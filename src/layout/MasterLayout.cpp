@@ -380,93 +380,127 @@ void CHyprMasterLayout::calculateWorkspace(PHLWORKSPACE pWorkspace) {
     }
 
     // compute placement of master window(s)
-    if (WINDOWS == 1 && !centerMasterWindow) {
-        static auto PALWAYSKEEPPOSITION = CConfigValue<Hyprlang::INT>("master:always_keep_position");
-        if (*PALWAYSKEEPPOSITION) {
-            const float WIDTH = WSSIZE.x * PMASTERNODE->percMaster;
-            float       nextX = 0;
+    if (WINDOWS == 1) {
+        static auto PMFACTSINGLE = CConfigValue<Hyprlang::FLOAT>("master:mfact_single");
 
-            if (orientation == ORIENTATION_RIGHT)
+        // If mfact_single > 0, use it as the ratio for the single tiled window
+        if (*PMFACTSINGLE > 0.f) {
+            const float RATIO = std::clamp(*PMFACTSINGLE, 0.05f, 0.95f);
+
+            if (orientation == ORIENTATION_TOP || orientation == ORIENTATION_BOTTOM) {
+                const float HEIGHT = WSSIZE.y * RATIO;
+                float       nextY  = 0.0;
+
+                if (orientation == ORIENTATION_BOTTOM)
+                    nextY = WSSIZE.y - HEIGHT;
+
+                PMASTERNODE->size     = Vector2D(WSSIZE.x, HEIGHT);
+                PMASTERNODE->position = WSPOS + Vector2D(0.0, nextY);
+            } else { // ORIENTATION_LEFT, ORIENTATION_RIGHT, ORIENTATION_CENTER
+                const float WIDTH = WSSIZE.x * RATIO;
+                float       nextX = 0.0;
+
+                if (orientation == ORIENTATION_RIGHT)
+                    nextX = WSSIZE.x - WIDTH;
+                else if (orientation == ORIENTATION_CENTER)
+                    nextX = (WSSIZE.x - WIDTH) / 2.0;
+
+                PMASTERNODE->size     = Vector2D(WIDTH, WSSIZE.y);
+                PMASTERNODE->position = WSPOS + Vector2D(nextX, 0.0);
+            }
+
+            applyNodeDataToWindow(PMASTERNODE);
+            return;
+        }
+
+        if (!centerMasterWindow) {
+            static auto PALWAYSKEEPPOSITION = CConfigValue<Hyprlang::INT>("master:always_keep_position");
+            if (*PALWAYSKEEPPOSITION) {
+                const float WIDTH = WSSIZE.x * PMASTERNODE->percMaster;
+                float       nextX = 0;
+
+                if (orientation == ORIENTATION_RIGHT)
+                    nextX = WSSIZE.x - WIDTH;
+                else if (orientation == ORIENTATION_CENTER)
+                    nextX = (WSSIZE.x - WIDTH) / 2;
+
+                PMASTERNODE->size     = Vector2D(WIDTH, WSSIZE.y);
+                PMASTERNODE->position = WSPOS + Vector2D(nextX, 0.0);
+            } else {
+                PMASTERNODE->size     = WSSIZE;
+                PMASTERNODE->position = WSPOS;
+            }
+
+            applyNodeDataToWindow(PMASTERNODE);
+            return;
+        } else if (orientation == ORIENTATION_TOP || orientation == ORIENTATION_BOTTOM) {
+            const float HEIGHT      = STACKWINDOWS != 0 ? WSSIZE.y * PMASTERNODE->percMaster : WSSIZE.y;
+            float       widthLeft   = WSSIZE.x;
+            int         mastersLeft = MASTERS;
+            float       nextX       = 0;
+            float       nextY       = 0;
+
+            if (orientation == ORIENTATION_BOTTOM)
+                nextY = WSSIZE.y - HEIGHT;
+
+            for (auto& nd : m_masterNodesData) {
+                if (nd.workspaceID != pWorkspace->m_id || !nd.isMaster)
+                    continue;
+
+                float WIDTH = mastersLeft > 1 ? widthLeft / mastersLeft * nd.percSize : widthLeft;
+                if (WIDTH > widthLeft * 0.9f && mastersLeft > 1)
+                    WIDTH = widthLeft * 0.9f;
+
+                if (*PSMARTRESIZING) {
+                    nd.percSize *= WSSIZE.x / masterAccumulatedSize;
+                    WIDTH = masterAverageSize * nd.percSize;
+                }
+
+                nd.size     = Vector2D(WIDTH, HEIGHT);
+                nd.position = WSPOS + Vector2D(nextX, nextY);
+                applyNodeDataToWindow(&nd);
+
+                mastersLeft--;
+                widthLeft -= WIDTH;
+                nextX += WIDTH;
+            }
+        } else { // orientation left, right or center
+            float WIDTH       = *PIGNORERESERVED && centerMasterWindow ? PMONITOR->m_size.x : WSSIZE.x;
+            float heightLeft  = WSSIZE.y;
+            int   mastersLeft = MASTERS;
+            float nextX       = 0;
+            float nextY       = 0;
+
+            if (STACKWINDOWS > 0 || centerMasterWindow)
+                WIDTH *= PMASTERNODE->percMaster;
+
+            if (orientation == ORIENTATION_RIGHT) {
                 nextX = WSSIZE.x - WIDTH;
-            else if (orientation == ORIENTATION_CENTER)
-                nextX = (WSSIZE.x - WIDTH) / 2;
-
-            PMASTERNODE->size     = Vector2D(WIDTH, WSSIZE.y);
-            PMASTERNODE->position = WSPOS + Vector2D(nextX, 0.0);
-        } else {
-            PMASTERNODE->size     = WSSIZE;
-            PMASTERNODE->position = WSPOS;
-        }
-
-        applyNodeDataToWindow(PMASTERNODE);
-        return;
-    } else if (orientation == ORIENTATION_TOP || orientation == ORIENTATION_BOTTOM) {
-        const float HEIGHT      = STACKWINDOWS != 0 ? WSSIZE.y * PMASTERNODE->percMaster : WSSIZE.y;
-        float       widthLeft   = WSSIZE.x;
-        int         mastersLeft = MASTERS;
-        float       nextX       = 0;
-        float       nextY       = 0;
-
-        if (orientation == ORIENTATION_BOTTOM)
-            nextY = WSSIZE.y - HEIGHT;
-
-        for (auto& nd : m_masterNodesData) {
-            if (nd.workspaceID != pWorkspace->m_id || !nd.isMaster)
-                continue;
-
-            float WIDTH = mastersLeft > 1 ? widthLeft / mastersLeft * nd.percSize : widthLeft;
-            if (WIDTH > widthLeft * 0.9f && mastersLeft > 1)
-                WIDTH = widthLeft * 0.9f;
-
-            if (*PSMARTRESIZING) {
-                nd.percSize *= WSSIZE.x / masterAccumulatedSize;
-                WIDTH = masterAverageSize * nd.percSize;
+            } else if (centerMasterWindow) {
+                nextX = ((*PIGNORERESERVED && centerMasterWindow ? PMONITOR->m_size.x : WSSIZE.x) - WIDTH) / 2;
             }
 
-            nd.size     = Vector2D(WIDTH, HEIGHT);
-            nd.position = WSPOS + Vector2D(nextX, nextY);
-            applyNodeDataToWindow(&nd);
+            for (auto& nd : m_masterNodesData) {
+                if (nd.workspaceID != pWorkspace->m_id || !nd.isMaster)
+                    continue;
 
-            mastersLeft--;
-            widthLeft -= WIDTH;
-            nextX += WIDTH;
-        }
-    } else { // orientation left, right or center
-        float WIDTH       = *PIGNORERESERVED && centerMasterWindow ? PMONITOR->m_size.x : WSSIZE.x;
-        float heightLeft  = WSSIZE.y;
-        int   mastersLeft = MASTERS;
-        float nextX       = 0;
-        float nextY       = 0;
+                float HEIGHT = mastersLeft > 1 ? heightLeft / mastersLeft * nd.percSize : heightLeft;
+                if (HEIGHT > heightLeft * 0.9f && mastersLeft > 1)
+                    HEIGHT = heightLeft * 0.9f;
 
-        if (STACKWINDOWS > 0 || centerMasterWindow)
-            WIDTH *= PMASTERNODE->percMaster;
+                if (*PSMARTRESIZING) {
+                    nd.percSize *= WSSIZE.y / masterAccumulatedSize;
+                    HEIGHT = masterAverageSize * nd.percSize;
+                }
 
-        if (orientation == ORIENTATION_RIGHT) {
-            nextX = WSSIZE.x - WIDTH;
-        } else if (centerMasterWindow) {
-            nextX = ((*PIGNORERESERVED && centerMasterWindow ? PMONITOR->m_size.x : WSSIZE.x) - WIDTH) / 2;
-        }
+                nd.size     = Vector2D(WIDTH, HEIGHT);
+                nd.position = (*PIGNORERESERVED && centerMasterWindow ? PMONITOR->m_position : WSPOS) + Vector2D(nextX, nextY);
+                applyNodeDataToWindow(&nd);
 
-        for (auto& nd : m_masterNodesData) {
-            if (nd.workspaceID != pWorkspace->m_id || !nd.isMaster)
-                continue;
-
-            float HEIGHT = mastersLeft > 1 ? heightLeft / mastersLeft * nd.percSize : heightLeft;
-            if (HEIGHT > heightLeft * 0.9f && mastersLeft > 1)
-                HEIGHT = heightLeft * 0.9f;
-
-            if (*PSMARTRESIZING) {
-                nd.percSize *= WSSIZE.y / masterAccumulatedSize;
-                HEIGHT = masterAverageSize * nd.percSize;
+                mastersLeft--;
+                heightLeft -= HEIGHT;
+                nextY += HEIGHT;
             }
-
-            nd.size     = Vector2D(WIDTH, HEIGHT);
-            nd.position = (*PIGNORERESERVED && centerMasterWindow ? PMONITOR->m_position : WSPOS) + Vector2D(nextX, nextY);
-            applyNodeDataToWindow(&nd);
-
-            mastersLeft--;
-            heightLeft -= HEIGHT;
-            nextY += HEIGHT;
         }
     }
 

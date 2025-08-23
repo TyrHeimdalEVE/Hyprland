@@ -606,6 +606,7 @@ CConfigManager::CConfigManager() {
 
     registerConfigVar("master:special_scale_factor", {1.f});
     registerConfigVar("master:mfact", {0.55f});
+    registerConfigVar("master:mfact_single", {0.00f});
     registerConfigVar("master:new_status", {"slave"});
     registerConfigVar("master:slave_count_for_center_master", Hyprlang::INT{2});
     registerConfigVar("master:center_master_fallback", {"left"});

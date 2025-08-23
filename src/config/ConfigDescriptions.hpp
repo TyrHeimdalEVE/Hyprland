@@ -1880,6 +1880,13 @@ inline static const std::vector<SConfigOptionDescription> CONFIG_OPTIONS = {
         .data = SConfigOptionDescription::SFloatData{0.55, 0, 1},
     },
     SConfigOptionDescription{
+        .value = "master:mfact_single",
+        .description =
+            "the size as a percentage of the master window if there are no other windows, for example `mfact_single = 0.70` would mean 70% of the screen will be the master window. Set to 0.0 to disable. [0.0 - 1.0]",
+        .type = CONFIG_OPTION_FLOAT,
+        .data = SConfigOptionDescription::SFloatData{0.00, 0, 1},
+    },
+    SConfigOptionDescription{
         .value       = "master:new_status",
         .description = "`master`: new window becomes master; `slave`: new windows are added to slave stack; `inherit`: inherit from focused window",
         .type        = CONFIG_OPTION_STRING_SHORT,
