@@ -53,7 +53,8 @@
 #include "config/ConfigManager.hpp"
 #include "render/OpenGL.hpp"
 #include "managers/input/InputManager.hpp"
-#include "managers/AnimationManager.hpp"
+#include "managers/animation/AnimationManager.hpp"
+#include "managers/animation/DesktopAnimationManager.hpp"
 #include "managers/EventManager.hpp"
 #include "managers/HookSystemManager.hpp"
 #include "managers/ProtocolManager.hpp"
@@ -169,7 +170,7 @@ void CCompositor::restoreNofile() {
 }
 
 bool CCompositor::supportsDrmSyncobjTimeline() const {
-    return m_bDrmSyncobjTimelineSupported;
+    return m_drm.syncobjSupport || m_drmRenderNode.syncObjSupport;
 }
 
 void CCompositor::setMallocThreshold() {
@@ -356,22 +357,32 @@ void CCompositor::initServer(std::string socketName, int socketFd) {
 
     m_initialized = true;
 
-    m_drmFD = m_aqBackend->drmFD();
-    Debug::log(LOG, "Running on DRMFD: {}", m_drmFD);
+    m_drm.fd = m_aqBackend->drmFD();
+    Debug::log(LOG, "Running on DRMFD: {}", m_drm.fd);
+
+    m_drmRenderNode.fd = m_aqBackend->drmRenderNodeFD();
+    Debug::log(LOG, "Using RENDERNODEFD: {}", m_drmRenderNode.fd);
 
 #if defined(__linux__)
-    if (m_drmFD >= 0) {
-        uint64_t cap                   = 0;
-        int      ret                   = drmGetCap(m_drmFD, DRM_CAP_SYNCOBJ_TIMELINE, &cap);
-        m_bDrmSyncobjTimelineSupported = (ret == 0 && cap != 0);
-        Debug::log(LOG, "DRM syncobj timeline support: {}", m_bDrmSyncobjTimelineSupported ? "yes" : "no");
-    } else {
-        m_bDrmSyncobjTimelineSupported = false;
-        Debug::log(LOG, "DRM syncobj timeline support: no (no DRM FD)");
-    }
+    auto syncObjSupport = [](auto fd) {
+        if (fd < 0)
+            return false;
+
+        uint64_t cap = 0;
+        int      ret = drmGetCap(fd, DRM_CAP_SYNCOBJ_TIMELINE, &cap);
+        return ret == 0 && cap != 0;
+    };
+
+    if ((m_drm.syncobjSupport = syncObjSupport(m_drm.fd)))
+        Debug::log(LOG, "DRM DisplayNode syncobj timeline support: {}", m_drm.syncobjSupport ? "yes" : "no");
+
+    if ((m_drmRenderNode.syncObjSupport = syncObjSupport(m_drmRenderNode.fd)))
+        Debug::log(LOG, "DRM RenderNode syncobj timeline support: {}", m_drmRenderNode.syncObjSupport ? "yes" : "no");
+
+    if (!m_drm.syncobjSupport && !m_drmRenderNode.syncObjSupport)
+        Debug::log(LOG, "DRM no syncobj support, disabling explicit sync");
 #else
     Debug::log(LOG, "DRM syncobj timeline support: no (not linux)");
-    m_bDrmSyncobjTimelineSupported = false;
 #endif
 
     if (!socketName.empty() && socketFd != -1) {
@@ -2025,8 +2036,10 @@ void CCompositor::swapActiveWorkspaces(PHLMONITOR pMonitorA, PHLMONITOR pMonitor
     g_pLayoutManager->getCurrentLayout()->recalculateMonitor(pMonitorA->m_id);
     g_pLayoutManager->getCurrentLayout()->recalculateMonitor(pMonitorB->m_id);
 
-    updateFullscreenFadeOnWorkspace(PWORKSPACEB);
-    updateFullscreenFadeOnWorkspace(PWORKSPACEA);
+    g_pDesktopAnimationManager->setFullscreenFadeAnimation(
+        PWORKSPACEB, PWORKSPACEB->m_hasFullscreenWindow ? CDesktopAnimationManager::ANIMATION_TYPE_IN : CDesktopAnimationManager::ANIMATION_TYPE_OUT);
+    g_pDesktopAnimationManager->setFullscreenFadeAnimation(
+        PWORKSPACEA, PWORKSPACEA->m_hasFullscreenWindow ? CDesktopAnimationManager::ANIMATION_TYPE_IN : CDesktopAnimationManager::ANIMATION_TYPE_OUT);
 
     if (pMonitorA->m_id == g_pCompositor->m_lastMonitor->m_id || pMonitorB->m_id == g_pCompositor->m_lastMonitor->m_id) {
         const auto LASTWIN = pMonitorA->m_id == g_pCompositor->m_lastMonitor->m_id ? PWORKSPACEB->getLastFocusedWindow() : PWORKSPACEA->getLastFocusedWindow();
@@ -2211,7 +2224,7 @@ void CCompositor::moveWorkspaceToMonitor(PHLWORKSPACE pWorkspace, PHLMONITOR pMo
 
         if (valid(pMonitor->m_activeWorkspace)) {
             pMonitor->m_activeWorkspace->m_visible = false;
-            pMonitor->m_activeWorkspace->startAnim(false, false);
+            g_pDesktopAnimationManager->startAnimation(pWorkspace, CDesktopAnimationManager::ANIMATION_TYPE_OUT, false);
         }
 
         if (*PHIDESPECIALONWORKSPACECHANGE)
@@ -2229,7 +2242,7 @@ void CCompositor::moveWorkspaceToMonitor(PHLWORKSPACE pWorkspace, PHLMONITOR pMo
 
         g_pLayoutManager->getCurrentLayout()->recalculateMonitor(pMonitor->m_id);
 
-        pWorkspace->startAnim(true, true, true);
+        g_pDesktopAnimationManager->startAnimation(pWorkspace, CDesktopAnimationManager::ANIMATION_TYPE_IN, true, true);
         pWorkspace->m_visible = true;
 
         if (!noWarpCursor)
@@ -2242,11 +2255,14 @@ void CCompositor::moveWorkspaceToMonitor(PHLWORKSPACE pWorkspace, PHLMONITOR pMo
     if (POLDMON) {
         g_pLayoutManager->getCurrentLayout()->recalculateMonitor(POLDMON->m_id);
         if (valid(POLDMON->m_activeWorkspace))
-            updateFullscreenFadeOnWorkspace(POLDMON->m_activeWorkspace);
+            g_pDesktopAnimationManager->setFullscreenFadeAnimation(POLDMON->m_activeWorkspace,
+                                                                   POLDMON->m_activeWorkspace->m_hasFullscreenWindow ? CDesktopAnimationManager::ANIMATION_TYPE_IN :
+                                                                                                                       CDesktopAnimationManager::ANIMATION_TYPE_OUT);
         updateSuspendedStates();
     }
 
-    updateFullscreenFadeOnWorkspace(pWorkspace);
+    g_pDesktopAnimationManager->setFullscreenFadeAnimation(
+        pWorkspace, pWorkspace->m_hasFullscreenWindow ? CDesktopAnimationManager::ANIMATION_TYPE_IN : CDesktopAnimationManager::ANIMATION_TYPE_OUT);
     updateSuspendedStates();
 
     // event
@@ -2267,36 +2283,6 @@ bool CCompositor::workspaceIDOutOfBounds(const WORKSPACEID& id) {
     }
 
     return std::clamp(id, lowestID, highestID) != id;
-}
-
-void CCompositor::updateFullscreenFadeOnWorkspace(PHLWORKSPACE pWorkspace) {
-
-    if (!pWorkspace)
-        return;
-
-    const auto FULLSCREEN = pWorkspace->m_hasFullscreenWindow;
-
-    for (auto const& w : g_pCompositor->m_windows) {
-        if (w->m_workspace == pWorkspace) {
-
-            if (w->m_fadingOut || w->m_pinned || w->isFullscreen())
-                continue;
-
-            if (!FULLSCREEN)
-                *w->m_alpha = 1.f;
-            else if (!w->isFullscreen())
-                *w->m_alpha = !w->m_createdOverFullscreen ? 0.f : 1.f;
-        }
-    }
-
-    const auto PMONITOR = pWorkspace->m_monitor.lock();
-
-    if (pWorkspace->m_id == PMONITOR->activeWorkspaceID() || pWorkspace->m_id == PMONITOR->activeSpecialWorkspaceID()) {
-        for (auto const& ls : PMONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP]) {
-            if (!ls->m_fadingOut)
-                *ls->m_alpha = FULLSCREEN && pWorkspace->m_fullscreenMode == FSMODE_FULLSCREEN ? 0.f : 1.f;
-        }
-    }
 }
 
 void CCompositor::changeWindowFullscreenModeClient(const PHLWINDOW PWINDOW, const eFullscreenMode MODE, const bool ON) {
@@ -2386,7 +2372,8 @@ void CCompositor::setWindowFullscreenState(const PHLWINDOW PWINDOW, SFullscreenS
             w->m_createdOverFullscreen = false;
     }
 
-    updateFullscreenFadeOnWorkspace(PWORKSPACE);
+    g_pDesktopAnimationManager->setFullscreenFadeAnimation(
+        PWORKSPACE, PWORKSPACE->m_hasFullscreenWindow ? CDesktopAnimationManager::ANIMATION_TYPE_IN : CDesktopAnimationManager::ANIMATION_TYPE_OUT);
 
     PWINDOW->sendWindowSize(true);
 
