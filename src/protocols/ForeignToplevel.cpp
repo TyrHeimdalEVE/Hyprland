@@ -35,7 +35,7 @@ CForeignToplevelList::CForeignToplevelList(SP<CExtForeignToplevelListV1> resourc
 
     for (auto const& w : g_pCompositor->m_windows) {
         if (!PROTO::foreignToplevel->windowValidForForeign(w))
-            return;
+            continue;
 
         onMap(w);
     }
@@ -44,6 +44,15 @@ CForeignToplevelList::CForeignToplevelList(SP<CExtForeignToplevelListV1> resourc
 void CForeignToplevelList::onMap(PHLWINDOW pWindow) {
     if UNLIKELY (m_finished)
         return;
+
+    // check if the window already had a handle in the past
+    const auto OLDHANDLE = handleForWindow(pWindow);
+    if (OLDHANDLE) {
+        if (!OLDHANDLE->m_closed)
+            OLDHANDLE->m_resource->sendClosed();
+
+        std::erase_if(m_handles, [&](const auto& other) { return other.get() == OLDHANDLE.get(); });
+    }
 
     const auto NEWHANDLE = PROTO::foreignToplevel->m_handles.emplace_back(
         makeShared<CForeignToplevelHandle>(makeShared<CExtForeignToplevelHandleV1>(m_resource->client(), m_resource->version(), 0), pWindow));

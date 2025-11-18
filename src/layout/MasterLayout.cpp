@@ -9,6 +9,7 @@
 #include "../managers/input/InputManager.hpp"
 #include "../managers/LayoutManager.hpp"
 #include "../managers/EventManager.hpp"
+#include "xwayland/XWayland.hpp"
 
 SMasterNodeData* CHyprMasterLayout::getNodeFromWindow(PHLWINDOW pWindow) {
     for (auto& nd : m_masterNodesData) {
@@ -241,7 +242,7 @@ void CHyprMasterLayout::onWindowRemovedTiling(PHLWINDOW pWindow) {
     const auto  MASTERSLEFT = getMastersOnWorkspace(WORKSPACEID);
     static auto SMALLSPLIT  = CConfigValue<Hyprlang::INT>("master:allow_small_split");
 
-    pWindow->unsetWindowData(PRIORITY_LAYOUT);
+    pWindow->m_ruleApplicator->resetProps(Desktop::Rule::RULE_PROP_ALL, Desktop::Types::PRIORITY_LAYOUT);
     pWindow->updateWindowData();
 
     if (pWindow->isFullscreen())
@@ -293,6 +294,13 @@ void CHyprMasterLayout::recalculateMonitor(const MONITORID& monid) {
         calculateWorkspace(PMONITOR->m_activeSpecialWorkspace);
 
     calculateWorkspace(PMONITOR->m_activeWorkspace);
+
+#ifndef NO_XWAYLAND
+    CBox box = g_pCompositor->calculateX11WorkArea();
+    if (!g_pXWayland || !g_pXWayland->m_wm)
+        return;
+    g_pXWayland->m_wm->updateWorkArea(box.x, box.y, box.w, box.h);
+#endif
 }
 
 void CHyprMasterLayout::calculateWorkspace(PHLWORKSPACE pWorkspace) {
@@ -689,7 +697,7 @@ void CHyprMasterLayout::applyNodeDataToWindow(SMasterNodeData* pNode) {
     if (PWINDOW->isFullscreen() && !pNode->ignoreFullscreenChecks)
         return;
 
-    PWINDOW->unsetWindowData(PRIORITY_LAYOUT);
+    PWINDOW->m_ruleApplicator->resetProps(Desktop::Rule::RULE_PROP_ALL, Desktop::Types::PRIORITY_LAYOUT);
     PWINDOW->updateWindowData();
 
     static auto PANIMATE     = CConfigValue<Hyprlang::INT>("misc:animate_manual_resizes");
@@ -724,6 +732,28 @@ void CHyprMasterLayout::applyNodeDataToWindow(SMasterNodeData* pNode) {
     const auto RESERVED = PWINDOW->getFullWindowReservedArea();
     calcPos             = calcPos + RESERVED.topLeft;
     calcSize            = calcSize - (RESERVED.topLeft + RESERVED.bottomRight);
+
+    Vector2D    availableSpace = calcSize;
+
+    static auto PCLAMP_TILED = CConfigValue<Hyprlang::INT>("misc:size_limits_tiled");
+
+    if (*PCLAMP_TILED) {
+        const auto borderSize       = PWINDOW->getRealBorderSize();
+        Vector2D   monitorAvailable = PMONITOR->m_size - PMONITOR->m_reservedTopLeft - PMONITOR->m_reservedBottomRight -
+            Vector2D{(double)(gapsOut.m_left + gapsOut.m_right), (double)(gapsOut.m_top + gapsOut.m_bottom)} - Vector2D{2.0 * borderSize, 2.0 * borderSize};
+
+        Vector2D minSize = PWINDOW->m_ruleApplicator->minSize().valueOr(Vector2D{MIN_WINDOW_SIZE, MIN_WINDOW_SIZE}).clamp(Vector2D{0, 0}, monitorAvailable);
+        Vector2D maxSize = PWINDOW->isFullscreen() ? Vector2D{INFINITY, INFINITY} :
+                                                     PWINDOW->m_ruleApplicator->maxSize().valueOr(Vector2D{INFINITY, INFINITY}).clamp(Vector2D{0, 0}, monitorAvailable);
+        calcSize         = calcSize.clamp(minSize, maxSize);
+
+        calcPos += (availableSpace - calcSize) / 2.0;
+
+        calcPos.x = std::clamp(calcPos.x, PMONITOR->m_position.x + PMONITOR->m_reservedTopLeft.x + gapsOut.m_left + borderSize,
+                               PMONITOR->m_size.x + PMONITOR->m_position.x - PMONITOR->m_reservedBottomRight.x - gapsOut.m_right - calcSize.x - borderSize);
+        calcPos.y = std::clamp(calcPos.y, PMONITOR->m_position.y + PMONITOR->m_reservedTopLeft.y + gapsOut.m_top + borderSize,
+                               PMONITOR->m_size.y + PMONITOR->m_position.y - PMONITOR->m_reservedBottomRight.y - gapsOut.m_bottom - calcSize.y - borderSize);
+    }
 
     if (PWINDOW->onSpecialWorkspace() && !PWINDOW->isFullscreen()) {
         static auto PSCALEFACTOR = CConfigValue<Hyprlang::FLOAT>("master:special_scale_factor");
@@ -766,9 +796,9 @@ void CHyprMasterLayout::resizeActiveWindow(const Vector2D& pixResize, eRectCorne
     const auto PNODE = getNodeFromWindow(PWINDOW);
 
     if (!PNODE) {
-        *PWINDOW->m_realSize =
-            (PWINDOW->m_realSize->goal() + pixResize)
-                .clamp(PWINDOW->m_windowData.minSize.valueOr(Vector2D{MIN_WINDOW_SIZE, MIN_WINDOW_SIZE}), PWINDOW->m_windowData.maxSize.valueOr(Vector2D{INFINITY, INFINITY}));
+        *PWINDOW->m_realSize = (PWINDOW->m_realSize->goal() + pixResize)
+                                   .clamp(PWINDOW->m_ruleApplicator->minSize().valueOr(Vector2D{MIN_WINDOW_SIZE, MIN_WINDOW_SIZE}),
+                                          PWINDOW->m_ruleApplicator->maxSize().valueOr(Vector2D{INFINITY, INFINITY}));
         PWINDOW->updateWindowDecos();
         return;
     }
@@ -923,7 +953,7 @@ void CHyprMasterLayout::fullscreenRequestForWindow(PHLWINDOW pWindow, const eFul
             *pWindow->m_realPosition = pWindow->m_lastFloatingPosition;
             *pWindow->m_realSize     = pWindow->m_lastFloatingSize;
 
-            pWindow->unsetWindowData(PRIORITY_LAYOUT);
+            pWindow->m_ruleApplicator->resetProps(Desktop::Rule::RULE_PROP_ALL, Desktop::Types::PRIORITY_LAYOUT);
             pWindow->updateWindowData();
         }
     } else {
@@ -1137,8 +1167,8 @@ std::any CHyprMasterLayout::layoutMessage(SLayoutMessageHeader header, std::stri
         const bool IGNORE_IF_MASTER = vars.size() >= 2 && std::ranges::any_of(vars, [](const auto& e) { return e == "ignoremaster"; });
 
         if (PMASTER->pWindow.lock() != PWINDOW) {
-            const auto NEWMASTER       = PWINDOW;
-            const bool newFocusToChild = vars.size() >= 2 && vars[1] == "child";
+            const auto& NEWMASTER       = PWINDOW;
+            const bool  newFocusToChild = vars.size() >= 2 && vars[1] == "child";
             switchWindows(NEWMASTER, NEWCHILD);
             const auto NEWFOCUS = newFocusToChild ? NEWCHILD : NEWMASTER;
             switchToWindow(NEWFOCUS);

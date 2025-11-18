@@ -1,6 +1,7 @@
 #include "Monitor.hpp"
 #include "MiscFunctions.hpp"
 #include "../macros.hpp"
+#include "SharedDefs.hpp"
 #include "math/Math.hpp"
 #include "../protocols/ColorManagement.hpp"
 #include "../Compositor.hpp"
@@ -25,6 +26,8 @@
 #include "../managers/animation/AnimationManager.hpp"
 #include "../managers/animation/DesktopAnimationManager.hpp"
 #include "../managers/input/InputManager.hpp"
+#include "../hyprerror/HyprError.hpp"
+#include "../i18n/Engine.hpp"
 #include "sync/SyncTimeline.hpp"
 #include "time/Time.hpp"
 #include "../desktop/LayerSurface.hpp"
@@ -54,6 +57,8 @@ CMonitor::CMonitor(SP<Aquamarine::IOutput> output_) : m_state(this), m_output(ou
     m_cursorZoom->setUpdateCallback([this](auto) { g_pHyprRenderer->damageMonitor(m_self.lock()); });
     g_pAnimationManager->createAnimation(0.F, m_zoomAnimProgress, g_pConfigManager->getAnimationPropertyConfig("monitorAdded"), AVARDAMAGE_NONE);
     m_zoomAnimProgress->setUpdateCallback([this](auto) { g_pHyprRenderer->damageMonitor(m_self.lock()); });
+    g_pAnimationManager->createAnimation(0.F, m_backgroundOpacity, g_pConfigManager->getAnimationPropertyConfig("monitorAdded"), AVARDAMAGE_NONE);
+    m_backgroundOpacity->setUpdateCallback([this](auto) { g_pHyprRenderer->damageMonitor(m_self.lock()); });
     g_pAnimationManager->createAnimation(0.F, m_dpmsBlackOpacity, g_pConfigManager->getAnimationPropertyConfig("fadeDpms"), AVARDAMAGE_NONE);
     m_dpmsBlackOpacity->setUpdateCallback([this](auto) { g_pHyprRenderer->damageMonitor(m_self.lock()); });
 }
@@ -135,6 +140,8 @@ void CMonitor::onConnect(bool noRule) {
         }
 
         m_frameScheduler->onPresented();
+
+        m_events.presented.emit();
     });
 
     m_listeners.destroy = m_output->events.destroy.listen([this] {
@@ -170,7 +177,11 @@ void CMonitor::onConnect(bool noRule) {
         m_forceSize = SIZE;
 
         SMonitorRule rule = m_activeMonitorRule;
-        rule.resolution   = SIZE;
+
+        if (SIZE == rule.resolution)
+            return;
+
+        rule.resolution = SIZE;
 
         applyMonitorRule(&rule);
     });
@@ -340,7 +351,7 @@ void CMonitor::onDisconnect(bool destroy) {
         g_pEventManager->postEvent(SHyprIPCEvent{"monitorremoved", m_name});
         g_pEventManager->postEvent(SHyprIPCEvent{"monitorremovedv2", std::format("{},{},{}", m_id, m_name, m_shortDescription)});
         EMIT_HOOK_EVENT("monitorRemoved", m_self.lock());
-        g_pCompositor->arrangeMonitors();
+        g_pCompositor->scheduleMonitorStateRecheck();
     }};
 
     m_frameScheduler.reset();
@@ -461,17 +472,41 @@ void CMonitor::onDisconnect(bool destroy) {
     std::erase_if(g_pCompositor->m_monitors, [&](PHLMONITOR& el) { return el.get() == this; });
 }
 
-void CMonitor::applyCMType(eCMType cmType) {
-    auto oldImageDescription = m_imageDescription;
+void CMonitor::applyCMType(NCMType::eCMType cmType, int cmSdrEotf) {
+    auto        oldImageDescription = m_imageDescription;
+    static auto PSDREOTF            = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
+    auto        chosenSdrEotf       = cmSdrEotf == 0 ? (*PSDREOTF > 0 ? NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22 : NColorManagement::CM_TRANSFER_FUNCTION_SRGB) :
+                                                       (cmSdrEotf == 1 ? NColorManagement::CM_TRANSFER_FUNCTION_SRGB : NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22);
+
     switch (cmType) {
-        case CM_SRGB: m_imageDescription = {}; break; // assumes SImageDescirption defaults to sRGB
-        case CM_WIDE:
-            m_imageDescription = {.primariesNameSet = true,
+        case NCMType::CM_SRGB: m_imageDescription = {.transferFunction = chosenSdrEotf}; break; // assumes SImageDescription defaults to sRGB
+        case NCMType::CM_WIDE:
+            m_imageDescription = {.transferFunction = chosenSdrEotf,
+                                  .primariesNameSet = true,
                                   .primariesNamed   = NColorManagement::CM_PRIMARIES_BT2020,
                                   .primaries        = NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_BT2020)};
             break;
-        case CM_EDID:
-            m_imageDescription = {.primariesNameSet = false,
+        case NCMType::CM_DCIP3:
+            m_imageDescription = {.transferFunction = chosenSdrEotf,
+                                  .primariesNameSet = true,
+                                  .primariesNamed   = NColorManagement::CM_PRIMARIES_DCI_P3,
+                                  .primaries        = NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_DCI_P3)};
+            break;
+        case NCMType::CM_DP3:
+            m_imageDescription = {.transferFunction = chosenSdrEotf,
+                                  .primariesNameSet = true,
+                                  .primariesNamed   = NColorManagement::CM_PRIMARIES_DISPLAY_P3,
+                                  .primaries        = NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_DISPLAY_P3)};
+            break;
+        case NCMType::CM_ADOBE:
+            m_imageDescription = {.transferFunction = chosenSdrEotf,
+                                  .primariesNameSet = true,
+                                  .primariesNamed   = NColorManagement::CM_PRIMARIES_ADOBE_RGB,
+                                  .primaries        = NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_ADOBE_RGB)};
+            break;
+        case NCMType::CM_EDID:
+            m_imageDescription = {.transferFunction = chosenSdrEotf,
+                                  .primariesNameSet = true,
                                   .primariesNamed   = NColorManagement::CM_PRIMARIES_BT2020,
                                   .primaries        = {
                                              .red   = {.x = m_output->parsedEDID.chromaticityCoords->red.x, .y = m_output->parsedEDID.chromaticityCoords->red.y},
@@ -480,14 +515,14 @@ void CMonitor::applyCMType(eCMType cmType) {
                                              .white = {.x = m_output->parsedEDID.chromaticityCoords->white.x, .y = m_output->parsedEDID.chromaticityCoords->white.y},
                                   }};
             break;
-        case CM_HDR:
+        case NCMType::CM_HDR:
             m_imageDescription = {.transferFunction = NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ,
                                   .primariesNameSet = true,
                                   .primariesNamed   = NColorManagement::CM_PRIMARIES_BT2020,
                                   .primaries        = NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_BT2020),
                                   .luminances       = {.min = 0, .max = 10000, .reference = 203}};
             break;
-        case CM_HDR_EDID:
+        case NCMType::CM_HDR_EDID:
             m_imageDescription = {.transferFunction = NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ,
                                   .primariesNameSet = false,
                                   .primariesNamed   = NColorManagement::CM_PRIMARIES_BT2020,
@@ -515,7 +550,8 @@ void CMonitor::applyCMType(eCMType cmType) {
 
     if (oldImageDescription != m_imageDescription) {
         m_imageDescription.updateId();
-        PROTO::colorManagement->onMonitorImageDescriptionChanged(m_self);
+        if (PROTO::colorManagement)
+            PROTO::colorManagement->onMonitorImageDescriptionChanged(m_self);
     }
 }
 
@@ -780,8 +816,8 @@ bool CMonitor::applyMonitorRule(SMonitorRule* pMonitorRule, bool force) {
             if (!m_state.test())
                 continue;
 
-            auto errorMessage =
-                std::format("Monitor {} failed to set any requested modes, falling back to mode {:X0}@{:.2f}Hz", m_name, mode->pixelSize, mode->refreshRate / 1000.f);
+            auto errorMessage = I18n::i18nEngine()->localize(I18n::TXT_KEY_NOTIF_MONITOR_MODE_FAIL,
+                                                             {{"name", m_name}, {"mode", std::format("{:X0}@{:.2f}Hz", mode->pixelSize, mode->refreshRate / 1000.f)}});
             Debug::log(WARN, errorMessage);
             g_pHyprNotificationOverlay->addNotification(errorMessage, CHyprColor(0xff0000ff), 5000, ICON_WARNING);
 
@@ -841,12 +877,14 @@ bool CMonitor::applyMonitorRule(SMonitorRule* pMonitorRule, bool force) {
 
     m_cmType = RULE->cmType;
     switch (m_cmType) {
-        case CM_AUTO: m_cmType = m_enabled10bit && supportsWideColor() ? CM_WIDE : CM_SRGB; break;
-        case CM_EDID: m_cmType = m_output->parsedEDID.chromaticityCoords.has_value() ? CM_EDID : CM_SRGB; break;
-        case CM_HDR:
-        case CM_HDR_EDID: m_cmType = supportsHDR() ? m_cmType : CM_SRGB; break;
+        case NCMType::CM_AUTO: m_cmType = m_enabled10bit && supportsWideColor() ? NCMType::CM_WIDE : NCMType::CM_SRGB; break;
+        case NCMType::CM_EDID: m_cmType = m_output->parsedEDID.chromaticityCoords.has_value() ? NCMType::CM_EDID : NCMType::CM_SRGB; break;
+        case NCMType::CM_HDR:
+        case NCMType::CM_HDR_EDID: m_cmType = supportsHDR() ? m_cmType : NCMType::CM_SRGB; break;
         default: break;
     }
+
+    m_sdrEotf = RULE->sdrEotf;
 
     m_sdrMinLuminance = RULE->sdrMinLuminance;
     m_sdrMaxLuminance = RULE->sdrMaxLuminance;
@@ -855,7 +893,7 @@ bool CMonitor::applyMonitorRule(SMonitorRule* pMonitorRule, bool force) {
     m_maxLuminance    = RULE->maxLuminance;
     m_maxAvgLuminance = RULE->maxAvgLuminance;
 
-    applyCMType(m_cmType);
+    applyCMType(m_cmType, m_sdrEotf);
 
     m_sdrSaturation = RULE->sdrSaturation;
     m_sdrBrightness = RULE->sdrBrightness;
@@ -904,11 +942,14 @@ bool CMonitor::applyMonitorRule(SMonitorRule* pMonitorRule, bool force) {
             } else {
                 if (!autoScale) {
                     Debug::log(ERR, "Invalid scale passed to monitor, {} found suggestion {}", m_scale, searchScale);
-                    g_pConfigManager->addParseError(
-                        std::format("Invalid scale passed to monitor {}, failed to find a clean divisor. Suggested nearest scale: {:5f}", m_name, searchScale));
-                    m_scale = getDefaultScale();
-                } else
-                    m_scale = searchScale;
+                    static auto PDISABLENOTIFICATION = CConfigValue<Hyprlang::INT>("misc:disable_scale_notification");
+                    if (!*PDISABLENOTIFICATION)
+                        g_pHyprNotificationOverlay->addNotification(
+                            I18n::i18nEngine()->localize(I18n::TXT_KEY_NOTIF_MONITOR_AUTO_SCALE,
+                                                         {{"name", m_name}, {"scale", std::format("{:.2f}", m_scale)}, {"fixed_scale", std::format("{:.2f}", searchScale)}}),
+                            CHyprColor(1.0, 0.0, 0.0, 1.0), 5000, ICON_WARNING);
+                }
+                m_scale = searchScale;
             }
         }
     }
@@ -934,7 +975,7 @@ bool CMonitor::applyMonitorRule(SMonitorRule* pMonitorRule, bool force) {
     if (WAS10B != m_enabled10bit || OLDRES != m_pixelSize)
         g_pHyprOpenGL->destroyMonitorResources(m_self);
 
-    g_pCompositor->arrangeMonitors();
+    g_pCompositor->scheduleMonitorStateRecheck();
 
     m_damage.setSize(m_transformedSize);
 
@@ -988,8 +1029,8 @@ bool CMonitor::shouldSkipScheduleFrameOnMouseEvent() {
     static auto PMINRR   = CConfigValue<Hyprlang::INT>("cursor:min_refresh_rate");
 
     // skip scheduling extra frames for fullsreen apps with vrr
-    const bool shouldSkip = m_activeWorkspace && m_activeWorkspace->m_hasFullscreenWindow && m_activeWorkspace->m_fullscreenMode == FSMODE_FULLSCREEN &&
-        (*PNOBREAK == 1 || (*PNOBREAK == 2 && m_activeWorkspace->getFullscreenWindow()->getContentType() == CONTENT_TYPE_GAME)) && m_output->state->state().adaptiveSync;
+    const bool shouldSkip = inFullscreenMode() && (*PNOBREAK == 1 || (*PNOBREAK == 2 && m_activeWorkspace->getFullscreenWindow()->getContentType() == CONTENT_TYPE_GAME)) &&
+        m_output->state->state().adaptiveSync;
 
     // keep requested minimum refresh rate
     if (shouldSkip && *PMINRR && m_lastPresentationTimer.getMillis() > 1000.0f / *PMINRR) {
@@ -1160,7 +1201,7 @@ void CMonitor::setMirror(const std::string& mirrorOf) {
         // remove from mvmonitors
         std::erase_if(g_pCompositor->m_monitors, [&](const auto& other) { return other == m_self; });
 
-        g_pCompositor->arrangeMonitors();
+        g_pCompositor->scheduleMonitorStateRecheck();
 
         g_pCompositor->setActiveMonitor(g_pCompositor->m_monitors.front());
 
@@ -1475,6 +1516,10 @@ CBox CMonitor::logicalBox() {
     return {m_position, m_size};
 }
 
+CBox CMonitor::logicalBoxMinusExtents() {
+    return {m_position + m_reservedTopLeft, m_size - m_reservedTopLeft - m_reservedBottomRight};
+}
+
 void CMonitor::scheduleDone() {
     if (m_doneScheduled)
         return;
@@ -1499,11 +1544,17 @@ void CMonitor::setCTM(const Mat3x3& ctm_) {
     g_pCompositor->scheduleFrameForMonitor(m_self.lock(), Aquamarine::IOutput::scheduleFrameReason::AQ_SCHEDULE_NEEDS_FRAME);
 }
 
-uint16_t CMonitor::isSolitaryBlocked(bool full) {
-    uint16_t reasons = 0;
+uint32_t CMonitor::isSolitaryBlocked(bool full) {
+    uint32_t reasons = 0;
 
     if (g_pHyprNotificationOverlay->hasAny()) {
         reasons |= SC_NOTIFICATION;
+        if (!full)
+            return reasons;
+    }
+
+    if (g_pHyprError->active() && g_pCompositor->m_lastMonitor == m_self) {
+        reasons |= SC_ERRORBAR;
         if (!full)
             return reasons;
     }
@@ -1631,24 +1682,27 @@ uint8_t CMonitor::isTearingBlocked(bool full) {
     }
 
     if (!*PTEARINGENABLED) {
-        Debug::log(WARN, "Tearing commit requested but the master switch general:allow_tearing is off, ignoring");
         reasons |= TC_USER;
-        if (!full)
+        if (!full) {
+            Debug::log(WARN, "Tearing commit requested but the master switch general:allow_tearing is off, ignoring");
             return reasons;
+        }
     }
 
     if (g_pHyprOpenGL->m_renderData.mouseZoomFactor != 1.0) {
-        Debug::log(WARN, "Tearing commit requested but scale factor is not 1, ignoring");
         reasons |= TC_ZOOM;
-        if (!full)
+        if (!full) {
+            Debug::log(WARN, "Tearing commit requested but scale factor is not 1, ignoring");
             return reasons;
+        }
     }
 
     if (!m_tearingState.canTear) {
-        Debug::log(WARN, "Tearing commit requested but monitor doesn't support it, ignoring");
         reasons |= TC_SUPPORT;
-        if (!full)
+        if (!full) {
+            Debug::log(WARN, "Tearing commit requested but monitor doesn't support it, ignoring");
             return reasons;
+        }
     }
 
     if (m_solitaryClient.expired()) {
@@ -1671,6 +1725,8 @@ bool CMonitor::updateTearing() {
 uint16_t CMonitor::isDSBlocked(bool full) {
     uint16_t    reasons        = 0;
     static auto PDIRECTSCANOUT = CConfigValue<Hyprlang::INT>("render:direct_scanout");
+    static auto PPASS          = CConfigValue<Hyprlang::INT>("render:cm_fs_passthrough");
+    static auto PNONSHADER     = CConfigValue<Hyprlang::INT>("render:non_shader_cm");
 
     if (*PDIRECTSCANOUT == 0) {
         reasons |= DS_BLOCK_USER;
@@ -1734,18 +1790,23 @@ uint16_t CMonitor::isDSBlocked(bool full) {
 
     // we can't scanout shm buffers.
     const auto params = PSURFACE->m_current.buffer->dmabuf();
-    if (!params.success || !PSURFACE->m_current.texture->m_eglImage /* dmabuf */)
+    if (!params.success || !PSURFACE->m_current.texture->m_eglImage /* dmabuf */) {
         reasons |= DS_BLOCK_DMA;
+        if (!full)
+            return reasons;
+    }
+
+    if (needsCM() && *PNONSHADER != CM_NS_IGNORE && !canNoShaderCM() && (!inHDR() || (PSURFACE->m_colorManagement.valid() && PSURFACE->m_colorManagement->isWindowsScRGB())) &&
+        *PPASS != 1)
+        reasons |= DS_BLOCK_CM;
 
     return reasons;
 }
 
 bool CMonitor::attemptDirectScanout() {
     const auto blockedReason = isDSBlocked();
-    if (blockedReason) {
-        Debug::log(TRACE, "attemptDirectScanout: blocked by {}", blockedReason);
+    if (blockedReason)
         return false;
-    }
 
     const auto PCANDIDATE = m_solitaryClient.lock();
     const auto PSURFACE   = PCANDIDATE->getSolitaryResource();
@@ -1756,6 +1817,7 @@ bool CMonitor::attemptDirectScanout() {
 
     auto PBUFFER = PSURFACE->m_current.buffer.m_buffer;
 
+    // #TODO this entire bit needs figuring out, vrr goes down the drain without it
     if (PBUFFER == m_output->state->state().buffer) {
         PSURFACE->presentFeedback(Time::steadyNow(), m_self.lock());
 
@@ -1773,6 +1835,10 @@ bool CMonitor::attemptDirectScanout() {
 
             m_scanoutNeedsCursorUpdate = false;
         }
+
+        //#TODO this entire bit is bootleg deluxe, above bit is to not make vrr go down the drain, returning early here means fifo gets forever locked.
+        if (PSURFACE->m_fifo)
+            PSURFACE->m_stateQueue.unlockFirst(LOCK_REASON_FIFO);
 
         return true;
     }
@@ -1845,13 +1911,14 @@ void CMonitor::setDPMS(bool on) {
 
     if (on) {
         // enable the monitor. Wait for the frame to be presented, then begin animation
-        m_dpmsBlackOpacity->setValueAndWarp(1.F);
         m_dpmsBlackOpacity->setCallbackOnEnd(nullptr);
+        m_dpmsBlackOpacity->setValueAndWarp(1.F);
         m_pendingDpmsAnimation        = true;
         m_pendingDpmsAnimationCounter = 0;
         commitDPMSState(true);
     } else {
         // disable the monitor. Begin the animation, then do dpms on its end.
+        m_dpmsBlackOpacity->setCallbackOnEnd(nullptr);
         m_dpmsBlackOpacity->setValueAndWarp(0.F);
         *m_dpmsBlackOpacity = 1.F;
         m_dpmsBlackOpacity->setCallbackOnEnd(
@@ -1871,7 +1938,29 @@ void CMonitor::commitDPMSState(bool state) {
     m_output->state->setEnabled(state);
 
     if (!m_state.commit()) {
-        Debug::log(ERR, "Couldn't commit output {} for DPMS = {}", m_name, state);
+        Debug::log(ERR, "Couldn't commit output {} for DPMS = {}, will retry.", m_name, state);
+
+        // retry in 2 frames. This could happen when the DRM backend rejects our commit
+        // because disable + enable were sent almost instantly
+
+        m_dpmsRetryTimer = makeShared<CEventLoopTimer>(
+            std::chrono::milliseconds(2000 / sc<int>(m_refreshRate)),
+            [this, self = m_self](SP<CEventLoopTimer> s, void* d) {
+                if (!self)
+                    return;
+
+                m_output->state->resetExplicitFences();
+                m_output->state->setEnabled(m_dpmsStatus);
+                if (!m_state.commit()) {
+                    Debug::log(ERR, "Couldn't retry committing output {} for DPMS = {}", m_name, m_dpmsStatus);
+                    return;
+                }
+
+                m_dpmsRetryTimer.reset();
+            },
+            nullptr);
+        g_pEventLoopManager->addTimer(m_dpmsRetryTimer);
+
         return;
     }
 
@@ -1933,6 +2022,57 @@ bool CMonitor::wantsHDR() {
 
 bool CMonitor::inHDR() {
     return m_output->state->state().hdrMetadata.hdmi_metadata_type1.eotf == 2;
+}
+
+bool CMonitor::inFullscreenMode() {
+    return m_activeWorkspace && m_activeWorkspace->m_hasFullscreenWindow && m_activeWorkspace->m_fullscreenMode == FSMODE_FULLSCREEN;
+}
+
+std::optional<NColorManagement::SImageDescription> CMonitor::getFSImageDescription() {
+    if (!inFullscreenMode())
+        return {};
+
+    const auto FS_WINDOW = m_activeWorkspace->getFullscreenWindow();
+    if (!FS_WINDOW)
+        return {}; // should be unreachable
+
+    const auto ROOT_SURF = FS_WINDOW->m_wlSurface->resource();
+    const auto SURF      = ROOT_SURF->findWithCM();
+    return SURF ? SURF->m_colorManagement->imageDescription() : SImageDescription{};
+}
+
+bool CMonitor::needsCM() {
+    const auto SRC_DESC = getFSImageDescription();
+    return SRC_DESC.has_value() && SRC_DESC.value() != m_imageDescription;
+}
+
+// TODO support more drm properties
+bool CMonitor::canNoShaderCM() {
+    static auto PNONSHADER = CConfigValue<Hyprlang::INT>("render:non_shader_cm");
+    if (*PNONSHADER == CM_NS_DISABLE)
+        return false;
+
+    const auto SRC_DESC = getFSImageDescription();
+    if (!SRC_DESC.has_value())
+        return false;
+
+    if (SRC_DESC.value() == m_imageDescription)
+        return true; // no CM needed
+
+    if (SRC_DESC->icc.fd >= 0 || m_imageDescription.icc.fd >= 0)
+        return false; // no ICC support
+
+    // only primaries differ
+    if (SRC_DESC->transferFunction == m_imageDescription.transferFunction && SRC_DESC->transferFunctionPower == m_imageDescription.transferFunctionPower &&
+        (!inHDR() || SRC_DESC->luminances == m_imageDescription.luminances) && SRC_DESC->masteringLuminances == m_imageDescription.masteringLuminances &&
+        SRC_DESC->maxCLL == m_imageDescription.maxCLL && SRC_DESC->maxFALL == m_imageDescription.maxFALL)
+        return true;
+
+    return false;
+}
+
+bool CMonitor::doesNoShaderCM() {
+    return m_noShaderCTM;
 }
 
 CMonitorState::CMonitorState(CMonitor* owner) : m_owner(owner) {

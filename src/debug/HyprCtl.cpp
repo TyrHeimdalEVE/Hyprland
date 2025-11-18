@@ -44,6 +44,7 @@ using namespace Hyprutils::OS;
 #include "config/ConfigManager.hpp"
 #include "helpers/MiscFunctions.hpp"
 #include "../desktop/LayerSurface.hpp"
+#include "../desktop/rule/Engine.hpp"
 #include "../version.h"
 
 #include "../Compositor.hpp"
@@ -111,13 +112,14 @@ static std::string availableModesForOutput(PHLMONITOR pMonitor, eHyprCtlOutputFo
 }
 
 const std::array<const char*, CMonitor::SC_CHECKS_COUNT> SOLITARY_REASONS_JSON = {
-    "\"UNKNOWN\"", "\"NOTIFICATION\"", "\"LOCK\"",   "\"WORKSPACE\"", "\"WINDOWED\"", "\"DND\"",   "\"SPECIAL\"",    "\"ALPHA\"",
-    "\"OFFSET\"",  "\"CANDIDATE\"",    "\"OPAQUE\"", "\"TRANSFORM\"", "\"OVERLAYS\"", "\"FLOAT\"", "\"WORKSPACES\"", "\"SURFACES\"",
+    "\"UNKNOWN\"",   "\"NOTIFICATION\"", "\"LOCK\"",      "\"WORKSPACE\"", "\"WINDOWED\"", "\"DND\"",        "\"SPECIAL\"",  "\"ALPHA\"",       "\"OFFSET\"",
+    "\"CANDIDATE\"", "\"OPAQUE\"",       "\"TRANSFORM\"", "\"OVERLAYS\"",  "\"FLOAT\"",    "\"WORKSPACES\"", "\"SURFACES\"", "\"CONFIGERROR\"",
 };
 
 const std::array<const char*, CMonitor::SC_CHECKS_COUNT> SOLITARY_REASONS_TEXT = {
-    "unknown reason",   "notification",      "session lock", "invalid workspace",       "windowed mode",  "dnd active",       "special workspace", "alpha channel",
-    "workspace offset", "missing candidate", "not opaque",   "surface transformations", "other overlays", "floating windows", "other workspaces",  "subsurfaces",
+    "unknown reason",    "notification",     "session lock",     "invalid workspace", "windowed mode", "dnd active",
+    "special workspace", "alpha channel",    "workspace offset", "missing candidate", "not opaque",    "surface transformations",
+    "other overlays",    "floating windows", "other workspaces", "subsurfaces",       "config error",
 };
 
 std::string CHyprCtl::getSolitaryBlockedReason(Hyprutils::Memory::CSharedPointer<CMonitor> m, eHyprCtlOutputFormat format) {
@@ -128,7 +130,7 @@ std::string CHyprCtl::getSolitaryBlockedReason(Hyprutils::Memory::CSharedPointer
     std::string reasonStr = "";
     const auto  TEXTS     = format == eHyprCtlOutputFormat::FORMAT_JSON ? SOLITARY_REASONS_JSON : SOLITARY_REASONS_TEXT;
 
-    for (int i = 0; i < CMonitor::SC_CHECKS_COUNT; i++) {
+    for (uint32_t i = 0; i < CMonitor::SC_CHECKS_COUNT; i++) {
         if (reasons & (1 << i)) {
             if (reasonStr != "")
                 reasonStr += ",";
@@ -141,12 +143,12 @@ std::string CHyprCtl::getSolitaryBlockedReason(Hyprutils::Memory::CSharedPointer
 
 const std::array<const char*, CMonitor::DS_CHECKS_COUNT> DS_REASONS_JSON = {
     "\"UNKNOWN\"",   "\"USER\"",    "\"WINDOWED\"",  "\"CONTENT\"", "\"MIRROR\"",  "\"RECORD\"", "\"SW\"",
-    "\"CANDIDATE\"", "\"SURFACE\"", "\"TRANSFORM\"", "\"DMA\"",     "\"TEARING\"", "\"FAILED\"",
+    "\"CANDIDATE\"", "\"SURFACE\"", "\"TRANSFORM\"", "\"DMA\"",     "\"TEARING\"", "\"FAILED\"", "\"CM\"",
 };
 
 const std::array<const char*, CMonitor::DS_CHECKS_COUNT> DS_REASONS_TEXT = {
     "unknown reason",    "user settings",   "windowed mode",           "content type",   "monitor mirrors", "screen record/screenshot", "software renders/cursors",
-    "missing candidate", "invalid surface", "surface transformations", "invalid buffer", "tearing",         "activation failed",
+    "missing candidate", "invalid surface", "surface transformations", "invalid buffer", "tearing",         "activation failed",        "color management",
 };
 
 std::string CHyprCtl::getDSBlockedReason(Hyprutils::Memory::CSharedPointer<CMonitor> m, eHyprCtlOutputFormat format) {
@@ -240,7 +242,12 @@ std::string CHyprCtl::getMonitorData(Hyprutils::Memory::CSharedPointer<CMonitor>
     "disabled": {},
     "currentFormat": "{}",
     "mirrorOf": "{}",
-    "availableModes": [{}]
+    "availableModes": [{}],
+    "colorManagementPreset": "{}",
+    "sdrBrightness": {:.2f},
+    "sdrSaturation": {:.2f},
+    "sdrMinLuminance": {:.2f},
+    "sdrMaxLuminance": {}
 }},)#",
 
             m->m_id, escapeJSONStrings(m->m_name), escapeJSONStrings(m->m_shortDescription), escapeJSONStrings(m->m_output->make), escapeJSONStrings(m->m_output->model),
@@ -252,7 +259,8 @@ std::string CHyprCtl::getMonitorData(Hyprutils::Memory::CSharedPointer<CMonitor>
             (m->m_dpmsStatus ? "true" : "false"), (m->m_output->state->state().adaptiveSync ? "true" : "false"), rc<uint64_t>(m->m_solitaryClient.get()),
             getSolitaryBlockedReason(m, format), (m->m_tearingState.activelyTearing ? "true" : "false"), getTearingBlockedReason(m, format), rc<uint64_t>(m->m_lastScanout.get()),
             getDSBlockedReason(m, format), (m->m_enabled ? "false" : "true"), formatToString(m->m_output->state->state().drmFormat),
-            m->m_mirrorOf ? std::format("{}", m->m_mirrorOf->m_id) : "none", availableModesForOutput(m, format));
+            m->m_mirrorOf ? std::format("{}", m->m_mirrorOf->m_id) : "none", availableModesForOutput(m, format), (NCMType::toString(m->m_cmType)), (m->m_sdrBrightness),
+            (m->m_sdrSaturation), (m->m_sdrMinLuminance), (m->m_sdrMaxLuminance));
 
     } else {
         result += std::format(
@@ -261,7 +269,7 @@ std::string CHyprCtl::getMonitorData(Hyprutils::Memory::CSharedPointer<CMonitor>
             "dpmsStatus: {}\n\tvrr: {}\n\tsolitary: {:x}\n\tsolitaryBlockedBy: {}\n\tactivelyTearing: {}\n\ttearingBlockedBy: {}\n\tdirectScanoutTo: "
             "{:x}\n\tdirectScanoutBlockedBy: {}\n\tdisabled: "
             "{}\n\tcurrentFormat: {}\n\tmirrorOf: "
-            "{}\n\tavailableModes: {}\n\n",
+            "{}\n\tavailableModes: {}\n\tcolorManagementPreset: {}\n\tsdrBrightness: {:.2f}\n\tsdrSaturation: {:.2f}\n\tsdrMinLuminance: {:.2f}\n\tsdrMaxLuminance: {}\n\n",
             m->m_name, m->m_id, sc<int>(m->m_pixelSize.x), sc<int>(m->m_pixelSize.y), m->m_refreshRate, sc<int>(m->m_position.x), sc<int>(m->m_position.y), m->m_shortDescription,
             m->m_output->make, m->m_output->model, sc<int>(m->m_output->physicalSize.x), sc<int>(m->m_output->physicalSize.y), m->m_output->serial, m->activeWorkspaceID(),
             (!m->m_activeWorkspace ? "" : m->m_activeWorkspace->m_name), m->activeSpecialWorkspaceID(), (m->m_activeSpecialWorkspace ? m->m_activeSpecialWorkspace->m_name : ""),
@@ -269,7 +277,8 @@ std::string CHyprCtl::getMonitorData(Hyprutils::Memory::CSharedPointer<CMonitor>
             sc<int>(m->m_transform), (m == g_pCompositor->m_lastMonitor ? "yes" : "no"), sc<int>(m->m_dpmsStatus), m->m_output->state->state().adaptiveSync,
             rc<uint64_t>(m->m_solitaryClient.get()), getSolitaryBlockedReason(m, format), m->m_tearingState.activelyTearing, getTearingBlockedReason(m, format),
             rc<uint64_t>(m->m_lastScanout.get()), getDSBlockedReason(m, format), !m->m_enabled, formatToString(m->m_output->state->state().drmFormat),
-            m->m_mirrorOf ? std::format("{}", m->m_mirrorOf->m_id) : "none", availableModesForOutput(m, format));
+            m->m_mirrorOf ? std::format("{}", m->m_mirrorOf->m_id) : "none", availableModesForOutput(m, format), (NCMType::toString(m->m_cmType)), (m->m_sdrBrightness),
+            (m->m_sdrSaturation), (m->m_sdrMinLuminance), (m->m_sdrMaxLuminance));
     }
 
     return result;
@@ -309,7 +318,7 @@ static std::string monitorsRequest(eHyprCtlOutputFormat format, std::string requ
 }
 
 static std::string getTagsData(PHLWINDOW w, eHyprCtlOutputFormat format) {
-    const auto tags = w->m_tags.getTags();
+    const auto tags = w->m_ruleApplicator->m_tagKeeper.getTags();
 
     if (format == eHyprCtlOutputFormat::FORMAT_JSON)
         return std::ranges::fold_left(tags, std::string(),
@@ -722,10 +731,11 @@ static std::string devicesRequest(eHyprCtlOutputFormat format, std::string reque
                 R"#(    {{
         "address": "0x{:x}",
         "name": "{}",
-        "defaultSpeed": {:.5f}
+        "defaultSpeed": {:.5f},
+        "scrollFactor": {:.2f}
     }},)#",
                 rc<uintptr_t>(m.get()), escapeJSONStrings(m->m_hlName),
-                m->aq() && m->aq()->getLibinputHandle() ? libinput_device_config_accel_get_default_speed(m->aq()->getLibinputHandle()) : 0.f);
+                m->aq() && m->aq()->getLibinputHandle() ? libinput_device_config_accel_get_default_speed(m->aq()->getLibinputHandle()) : 0.f, m->m_scrollFactor.value_or(-1));
         }
 
         trimTrailingComma(result);
@@ -733,7 +743,9 @@ static std::string devicesRequest(eHyprCtlOutputFormat format, std::string reque
 
         result += "\"keyboards\": [\n";
         for (auto const& k : g_pInputManager->m_keyboards) {
-            const auto KM = k->getActiveLayout();
+            const auto INDEX_OPT = k->getActiveLayoutIndex();
+            const auto KI        = INDEX_OPT.has_value() ? std::to_string(INDEX_OPT.value()) : "none";
+            const auto KM        = k->getActiveLayout();
             result += std::format(
                 R"#(    {{
         "address": "0x{:x}",
@@ -743,13 +755,14 @@ static std::string devicesRequest(eHyprCtlOutputFormat format, std::string reque
         "layout": "{}",
         "variant": "{}",
         "options": "{}",
+        "active_layout_index": {},
         "active_keymap": "{}",
         "capsLock": {},
         "numLock": {},
         "main": {}
     }},)#",
                 rc<uintptr_t>(k.get()), escapeJSONStrings(k->m_hlName), escapeJSONStrings(k->m_currentRules.rules), escapeJSONStrings(k->m_currentRules.model),
-                escapeJSONStrings(k->m_currentRules.layout), escapeJSONStrings(k->m_currentRules.variant), escapeJSONStrings(k->m_currentRules.options), escapeJSONStrings(KM),
+                escapeJSONStrings(k->m_currentRules.layout), escapeJSONStrings(k->m_currentRules.variant), escapeJSONStrings(k->m_currentRules.options), KI, escapeJSONStrings(KM),
                 (getModState(k, XKB_MOD_NAME_CAPS) ? "true" : "false"), (getModState(k, XKB_MOD_NAME_NUM) ? "true" : "false"), (k->m_active ? "true" : "false"));
         }
 
@@ -826,18 +839,22 @@ static std::string devicesRequest(eHyprCtlOutputFormat format, std::string reque
         result += "mice:\n";
 
         for (auto const& m : g_pInputManager->m_pointers) {
-            result += std::format("\tMouse at {:x}:\n\t\t{}\n\t\t\tdefault speed: {:.5f}\n", rc<uintptr_t>(m.get()), m->m_hlName,
-                                  (m->aq() && m->aq()->getLibinputHandle() ? libinput_device_config_accel_get_default_speed(m->aq()->getLibinputHandle()) : 0.f));
+            result += std::format("\tMouse at {:x}:\n\t\t{}\n\t\t\tdefault speed: {:.5f}\n\t\t\tscroll factor: {:.2f}\n", rc<uintptr_t>(m.get()), m->m_hlName,
+                                  (m->aq() && m->aq()->getLibinputHandle() ? libinput_device_config_accel_get_default_speed(m->aq()->getLibinputHandle()) : 0.f),
+                                  m->m_scrollFactor.value_or(-1));
         }
 
         result += "\n\nKeyboards:\n";
 
         for (auto const& k : g_pInputManager->m_keyboards) {
-            const auto KM = k->getActiveLayout();
-            result += std::format("\tKeyboard at {:x}:\n\t\t{}\n\t\t\trules: r \"{}\", m \"{}\", l \"{}\", v \"{}\", o \"{}\"\n\t\t\tactive keymap: {}\n\t\t\tcapsLock: "
+            const auto INDEX_OPT = k->getActiveLayoutIndex();
+            const auto KI        = INDEX_OPT.has_value() ? std::to_string(INDEX_OPT.value()) : "none";
+            const auto KM        = k->getActiveLayout();
+            result += std::format("\tKeyboard at {:x}:\n\t\t{}\n\t\t\trules: r \"{}\", m \"{}\", l \"{}\", v \"{}\", o \"{}\"\n\t\t\tactive layout index: {}\n\t\t\tactive keymap: "
+                                  "{}\n\t\t\tcapsLock: "
                                   "{}\n\t\t\tnumLock: {}\n\t\t\tmain: {}\n",
                                   rc<uintptr_t>(k.get()), k->m_hlName, k->m_currentRules.rules, k->m_currentRules.model, k->m_currentRules.layout, k->m_currentRules.variant,
-                                  k->m_currentRules.options, KM, (getModState(k, XKB_MOD_NAME_CAPS) ? "yes" : "no"), (getModState(k, XKB_MOD_NAME_NUM) ? "yes" : "no"),
+                                  k->m_currentRules.options, KI, KM, (getModState(k, XKB_MOD_NAME_CAPS) ? "yes" : "no"), (getModState(k, XKB_MOD_NAME_NUM) ? "yes" : "no"),
                                   (k->m_active ? "yes" : "no"));
         }
 
@@ -991,7 +1008,7 @@ static std::string bindsRequest(eHyprCtlOutputFormat format, std::string request
                 ret += "d";
 
             ret += std::format("\n\tmodmask: {}\n\tsubmap: {}\n\tkey: {}\n\tkeycode: {}\n\tcatchall: {}\n\tdescription: {}\n\tdispatcher: {}\n\targ: {}\n\n", kb->modmask,
-                               kb->submap, kb->key, kb->keycode, kb->catchAll, kb->description, kb->handler, kb->arg);
+                               kb->submap.name, kb->key, kb->keycode, kb->catchAll, kb->description, kb->handler, kb->arg);
         }
     } else {
         // json
@@ -1009,6 +1026,7 @@ static std::string bindsRequest(eHyprCtlOutputFormat format, std::string request
     "has_description": {},
     "modmask": {},
     "submap": "{}",
+    "submap_universal": "{}",
     "key": "{}",
     "keycode": {},
     "catch_all": {},
@@ -1017,8 +1035,9 @@ static std::string bindsRequest(eHyprCtlOutputFormat format, std::string request
     "arg": "{}"
 }},)#",
                 kb->locked ? "true" : "false", kb->mouse ? "true" : "false", kb->release ? "true" : "false", kb->repeat ? "true" : "false", kb->longPress ? "true" : "false",
-                kb->nonConsuming ? "true" : "false", kb->hasDescription ? "true" : "false", kb->modmask, escapeJSONStrings(kb->submap), escapeJSONStrings(kb->key), kb->keycode,
-                kb->catchAll ? "true" : "false", escapeJSONStrings(kb->description), escapeJSONStrings(kb->handler), escapeJSONStrings(kb->arg));
+                kb->nonConsuming ? "true" : "false", kb->hasDescription ? "true" : "false", kb->modmask, escapeJSONStrings(kb->submap.name), kb->submapUniversal,
+                escapeJSONStrings(kb->key), kb->keycode, kb->catchAll ? "true" : "false", escapeJSONStrings(kb->description), escapeJSONStrings(kb->handler),
+                escapeJSONStrings(kb->arg));
         }
         trimTrailingComma(ret);
         ret += "]";
@@ -1035,10 +1054,12 @@ std::string versionRequest(eHyprCtlOutputFormat format, std::string request) {
     if (format == eHyprCtlOutputFormat::FORMAT_NORMAL) {
         std::string result = std::format("Hyprland {} built from branch {} at commit {} {} ({}).\n"
                                          "Date: {}\n"
-                                         "Tag: {}, commits: {}\n"
-                                         "built against:\n aquamarine {}\n hyprlang {}\n hyprutils {}\n hyprcursor {}\n hyprgraphics {}\n\n\n",
-                                         HYPRLAND_VERSION, GIT_BRANCH, GIT_COMMIT_HASH, GIT_DIRTY, commitMsg, GIT_COMMIT_DATE, GIT_TAG, GIT_COMMITS, AQUAMARINE_VERSION,
-                                         HYPRLANG_VERSION, HYPRUTILS_VERSION, HYPRCURSOR_VERSION, HYPRGRAPHICS_VERSION);
+                                         "Tag: {}, commits: {}\n",
+                                         HYPRLAND_VERSION, GIT_BRANCH, GIT_COMMIT_HASH, GIT_DIRTY, commitMsg, GIT_COMMIT_DATE, GIT_TAG, GIT_COMMITS);
+
+        result += "\n";
+        result += getBuiltSystemLibraryNames();
+        result += "\n";
 
 #if (!ISDEBUG && !defined(NO_XWAYLAND))
         result += "no flags were set\n";
@@ -1068,9 +1089,15 @@ std::string versionRequest(eHyprCtlOutputFormat format, std::string request) {
     "buildHyprutils": "{}",
     "buildHyprcursor": "{}",
     "buildHyprgraphics": "{}",
+    "systemAquamarine": "{}",
+    "systemHyprlang": "{}",
+    "systemHyprutils": "{}",
+    "systemHyprcursor": "{}",
+    "systemHyprgraphics": "{}",
     "flags": [)#",
             GIT_BRANCH, GIT_COMMIT_HASH, HYPRLAND_VERSION, (strcmp(GIT_DIRTY, "dirty") == 0 ? "true" : "false"), escapeJSONStrings(commitMsg), GIT_COMMIT_DATE, GIT_TAG,
-            GIT_COMMITS, AQUAMARINE_VERSION, HYPRLANG_VERSION, HYPRUTILS_VERSION, HYPRCURSOR_VERSION, HYPRGRAPHICS_VERSION);
+            GIT_COMMITS, AQUAMARINE_VERSION, HYPRLANG_VERSION, HYPRUTILS_VERSION, HYPRCURSOR_VERSION, HYPRGRAPHICS_VERSION, getSystemLibraryVersion("aquamarine"),
+            getSystemLibraryVersion("hyprlang"), getSystemLibraryVersion("hyprutils"), getSystemLibraryVersion("hyprcursor"), getSystemLibraryVersion("hyprgraphics"));
 
 #if ISDEBUG
         result += "\"debug\",";
@@ -1113,6 +1140,9 @@ std::string systemInfoRequest(eHyprCtlOutputFormat format, std::string request) 
     result += "Node name: " + std::string{unameInfo.nodename} + "\n";
     result += "Release: " + std::string{unameInfo.release} + "\n";
     result += "Version: " + std::string{unameInfo.version} + "\n";
+    result += "\n";
+    result += getBuiltSystemLibraryNames();
+    result += "\n";
 
     result += "\n\n";
 
@@ -1171,19 +1201,24 @@ std::string systemInfoRequest(eHyprCtlOutputFormat format, std::string request) 
     } else
         result += "\tunknown: not runtime\n";
 
-    result += std::format("\nExplicit sync: {}", g_pHyprOpenGL->m_exts.EGL_ANDROID_native_fence_sync_ext ? "supported" : "missing");
-    result += std::format("\nGL ver: {}", g_pHyprOpenGL->m_eglContextVersion == CHyprOpenGLImpl::EGL_CONTEXT_GLES_3_2 ? "3.2" : "3.0");
-    result += std::format("\nBackend: {}", g_pCompositor->m_aqBackend->hasSession() ? "drm" : "sessionless");
+    if (g_pHyprOpenGL) {
+        result += std::format("\nExplicit sync: {}", g_pHyprOpenGL->m_exts.EGL_ANDROID_native_fence_sync_ext ? "supported" : "missing");
+        result += std::format("\nGL ver: {}", g_pHyprOpenGL->m_eglContextVersion == CHyprOpenGLImpl::EGL_CONTEXT_GLES_3_2 ? "3.2" : "3.0");
+    }
 
-    result += "\n\nMonitor info:";
+    if (g_pCompositor) {
+        result += std::format("\nBackend: {}", g_pCompositor->m_aqBackend->hasSession() ? "drm" : "sessionless");
 
-    for (const auto& m : g_pCompositor->m_monitors) {
-        result += std::format("\n\tPanel {}: {}x{}, {} {} {} {} -> backend {}\n\t\texplicit {}\n\t\tedid:\n\t\t\thdr {}\n\t\t\tchroma {}\n\t\t\tbt2020 {}\n\t\tvrr capable "
-                              "{}\n\t\tnon-desktop {}\n\t\t",
-                              m->m_name, sc<int>(m->m_pixelSize.x), sc<int>(m->m_pixelSize.y), m->m_output->name, m->m_output->make, m->m_output->model, m->m_output->serial,
-                              backend(m->m_output->getBackend()->type()), check(m->m_output->supportsExplicit), check(m->m_output->parsedEDID.hdrMetadata.has_value()),
-                              check(m->m_output->parsedEDID.chromaticityCoords.has_value()), check(m->m_output->parsedEDID.supportsBT2020), check(m->m_output->vrrCapable),
-                              check(m->m_output->nonDesktop));
+        result += "\n\nMonitor info:";
+
+        for (const auto& m : g_pCompositor->m_monitors) {
+            result += std::format("\n\tPanel {}: {}x{}, {} {} {} {} -> backend {}\n\t\texplicit {}\n\t\tedid:\n\t\t\thdr {}\n\t\t\tchroma {}\n\t\t\tbt2020 {}\n\t\tvrr capable "
+                                  "{}\n\t\tnon-desktop {}\n\t\t",
+                                  m->m_name, sc<int>(m->m_pixelSize.x), sc<int>(m->m_pixelSize.y), m->m_output->name, m->m_output->make, m->m_output->model, m->m_output->serial,
+                                  backend(m->m_output->getBackend()->type()), check(m->m_output->supportsExplicit), check(m->m_output->parsedEDID.hdrMetadata.has_value()),
+                                  check(m->m_output->parsedEDID.chromaticityCoords.has_value()), check(m->m_output->parsedEDID.supportsBT2020), check(m->m_output->vrrCapable),
+                                  check(m->m_output->nonDesktop));
+        }
     }
 
     if (g_pHyprCtl && g_pHyprCtl->m_currentRequestParams.sysInfoConfig) {
@@ -1238,7 +1273,11 @@ static std::string dispatchKeyword(eHyprCtlOutputFormat format, std::string in) 
     if (COMMAND.empty())
         return "Invalid input: command is empty";
 
+    g_pHyprCtl->m_currentRequestParams.isDynamicKeyword = true;
+
     std::string retval = g_pConfigManager->parseKeyword(COMMAND, VALUE);
+
+    g_pHyprCtl->m_currentRequestParams.isDynamicKeyword = false;
 
     // if we are executing a dynamic source we have to reload everything, so every if will have a check for source.
     if (COMMAND == "monitor" || COMMAND == "source")
@@ -1272,8 +1311,7 @@ static std::string dispatchKeyword(eHyprCtlOutputFormat format, std::string in) 
         g_pConfigManager->updateWatcher();
 
     // decorations will probably need a repaint
-    if (COMMAND.contains("decoration:") || COMMAND.contains("border") || COMMAND == "workspace" || COMMAND.contains("zoom_factor") || COMMAND == "source" ||
-        COMMAND.starts_with("windowrule")) {
+    if (COMMAND.contains("decoration:") || COMMAND.contains("border") || COMMAND == "workspace" || COMMAND.contains("zoom_factor") || COMMAND == "source") {
         static auto PZOOMFACTOR = CConfigValue<Hyprlang::FLOAT>("cursor:zoom_factor");
         for (auto const& m : g_pCompositor->m_monitors) {
             *(m->m_cursorZoom) = *PZOOMFACTOR;
@@ -1281,6 +1319,9 @@ static std::string dispatchKeyword(eHyprCtlOutputFormat format, std::string in) 
             g_pLayoutManager->getCurrentLayout()->recalculateMonitor(m->m_id);
         }
     }
+
+    if (COMMAND.contains("windowrule ") || COMMAND.contains("windowrule["))
+        g_pConfigManager->reloadRules();
 
     if (COMMAND.contains("workspace"))
         g_pConfigManager->ensurePersistentWorkspacesPresent();
@@ -1487,11 +1528,6 @@ static std::string dispatchSeterror(eHyprCtlOutputFormat format, std::string req
     return "ok";
 }
 
-static std::string dispatchSetProp(eHyprCtlOutputFormat format, std::string request) {
-    auto result = g_pKeybindManager->m_dispatchers["setprop"](request.substr(request.find_first_of(' ') + 1));
-    return "DEPRECATED: use hyprctl dispatch setprop instead" + (result.success ? "" : "\n" + result.error);
-}
-
 static std::string dispatchGetProp(eHyprCtlOutputFormat format, std::string request) {
     CVarList vars(request, 0, ' ');
 
@@ -1509,9 +1545,9 @@ static std::string dispatchGetProp(eHyprCtlOutputFormat format, std::string requ
     const bool FORMNORM = format == FORMAT_NORMAL;
 
     auto       sizeToString = [&](bool max) -> std::string {
-        auto sizeValue = PWINDOW->m_windowData.minSize.valueOr(Vector2D(MIN_WINDOW_SIZE, MIN_WINDOW_SIZE));
+        auto sizeValue = PWINDOW->m_ruleApplicator->minSize().valueOr(Vector2D(MIN_WINDOW_SIZE, MIN_WINDOW_SIZE));
         if (max)
-            sizeValue = PWINDOW->m_windowData.maxSize.valueOr(Vector2D(INFINITY, INFINITY));
+            sizeValue = PWINDOW->m_ruleApplicator->maxSize().valueOr(Vector2D(INFINITY, INFINITY));
 
         if (FORMNORM)
             return std::format("{} {}", sizeValue.x, sizeValue.y);
@@ -1522,7 +1558,7 @@ static std::string dispatchGetProp(eHyprCtlOutputFormat format, std::string requ
         }
     };
 
-    auto alphaToString = [&](CWindowOverridableVar<SAlphaValue>& alpha, bool getAlpha) -> std::string {
+    auto alphaToString = [&](Desktop::Types::COverridableVar<Desktop::Types::SAlphaValue>& alpha, bool getAlpha) -> std::string {
         if (FORMNORM) {
             if (getAlpha)
                 return std::format("{}", alpha.valueOrDefault().alpha);
@@ -1556,7 +1592,7 @@ static std::string dispatchGetProp(eHyprCtlOutputFormat format, std::string requ
             const auto* const ACTIVECOLOR =
                 !PWINDOW->m_groupData.pNextWindow.lock() ? (!PWINDOW->m_groupData.deny ? ACTIVECOL : NOGROUPACTIVECOL) : (GROUPLOCKED ? GROUPACTIVELOCKEDCOL : GROUPACTIVECOL);
 
-            std::string borderColorString = PWINDOW->m_windowData.activeBorderColor.valueOr(*ACTIVECOLOR).toString();
+            std::string borderColorString = PWINDOW->m_ruleApplicator->activeBorderColor().valueOr(*ACTIVECOLOR).toString();
             if (FORMNORM)
                 return borderColorString;
             else
@@ -1569,7 +1605,7 @@ static std::string dispatchGetProp(eHyprCtlOutputFormat format, std::string requ
             const auto* const INACTIVECOLOR          = !PWINDOW->m_groupData.pNextWindow.lock() ? (!PWINDOW->m_groupData.deny ? INACTIVECOL : NOGROUPINACTIVECOL) :
                                                                                                   (GROUPLOCKED ? GROUPINACTIVELOCKEDCOL : GROUPINACTIVECOL);
 
-            std::string       borderColorString = PWINDOW->m_windowData.inactiveBorderColor.valueOr(*INACTIVECOLOR).toString();
+            std::string       borderColorString = PWINDOW->m_ruleApplicator->inactiveBorderColor().valueOr(*INACTIVECOLOR).toString();
             if (FORMNORM)
                 return borderColorString;
             else
@@ -1584,38 +1620,92 @@ static std::string dispatchGetProp(eHyprCtlOutputFormat format, std::string requ
             return std::format(R"({{"{}": {}}})", PROP, prop.valueOrDefault());
     };
 
-    if (PROP == "animationstyle") {
-        auto& animationStyle = PWINDOW->m_windowData.animationStyle;
+    if (PROP == "animation") {
+        auto& animationStyle = PWINDOW->m_ruleApplicator->animationStyle();
         if (FORMNORM)
             return animationStyle.valueOr("(unset)");
         else
             return std::format(R"({{"{}": "{}"}})", PROP, animationStyle.valueOr(""));
-    } else if (PROP == "maxsize")
+    } else if (PROP == "max_size")
         return sizeToString(true);
-    else if (PROP == "minsize")
+    else if (PROP == "min_size")
         return sizeToString(false);
-    else if (PROP == "alpha")
-        return alphaToString(PWINDOW->m_windowData.alpha, true);
-    else if (PROP == "alphainactive")
-        return alphaToString(PWINDOW->m_windowData.alphaInactive, true);
-    else if (PROP == "alphafullscreen")
-        return alphaToString(PWINDOW->m_windowData.alphaFullscreen, true);
-    else if (PROP == "alphaoverride")
-        return alphaToString(PWINDOW->m_windowData.alpha, false);
-    else if (PROP == "alphainactiveoverride")
-        return alphaToString(PWINDOW->m_windowData.alphaInactive, false);
-    else if (PROP == "alphafullscreenoverride")
-        return alphaToString(PWINDOW->m_windowData.alphaFullscreen, false);
-    else if (PROP == "activebordercolor")
+    else if (PROP == "opacity")
+        return alphaToString(PWINDOW->m_ruleApplicator->alpha(), true);
+    else if (PROP == "opacity_inactive")
+        return alphaToString(PWINDOW->m_ruleApplicator->alphaInactive(), true);
+    else if (PROP == "opacity_fullscreen")
+        return alphaToString(PWINDOW->m_ruleApplicator->alphaFullscreen(), true);
+    else if (PROP == "opacity_override")
+        return alphaToString(PWINDOW->m_ruleApplicator->alpha(), false);
+    else if (PROP == "opacity_inactive_override")
+        return alphaToString(PWINDOW->m_ruleApplicator->alphaInactive(), false);
+    else if (PROP == "opacity_fullscreen_override")
+        return alphaToString(PWINDOW->m_ruleApplicator->alphaFullscreen(), false);
+    else if (PROP == "active_border_color")
         return borderColorToString(true);
-    else if (PROP == "inactivebordercolor")
+    else if (PROP == "inactive_border_color")
         return borderColorToString(false);
-    else if (auto search = NWindowProperties::boolWindowProperties.find(PROP); search != NWindowProperties::boolWindowProperties.end())
-        return windowPropToString(*search->second(PWINDOW));
-    else if (auto search = NWindowProperties::intWindowProperties.find(PROP); search != NWindowProperties::intWindowProperties.end())
-        return windowPropToString(*search->second(PWINDOW));
-    else if (auto search = NWindowProperties::floatWindowProperties.find(PROP); search != NWindowProperties::floatWindowProperties.end())
-        return windowPropToString(*search->second(PWINDOW));
+    else if (PROP == "allows_input")
+        return windowPropToString(PWINDOW->m_ruleApplicator->allowsInput());
+    else if (PROP == "decorate")
+        return windowPropToString(PWINDOW->m_ruleApplicator->decorate());
+    else if (PROP == "focus_on_activate")
+        return windowPropToString(PWINDOW->m_ruleApplicator->focusOnActivate());
+    else if (PROP == "keep_aspect_ratio")
+        return windowPropToString(PWINDOW->m_ruleApplicator->keepAspectRatio());
+    else if (PROP == "nearest_neighbor")
+        return windowPropToString(PWINDOW->m_ruleApplicator->nearestNeighbor());
+    else if (PROP == "no_anim")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noAnim());
+    else if (PROP == "no_blur")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noBlur());
+    else if (PROP == "no_dim")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noDim());
+    else if (PROP == "no_focus")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noFocus());
+    else if (PROP == "no_max_size")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noMaxSize());
+    else if (PROP == "no_shadow")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noShadow());
+    else if (PROP == "no_shortcuts_inhibit")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noShortcutsInhibit());
+    else if (PROP == "opaque")
+        return windowPropToString(PWINDOW->m_ruleApplicator->opaque());
+    else if (PROP == "dim_around")
+        return windowPropToString(PWINDOW->m_ruleApplicator->dimAround());
+    else if (PROP == "force_rgbx")
+        return windowPropToString(PWINDOW->m_ruleApplicator->RGBX());
+    else if (PROP == "sync_fullscreen")
+        return windowPropToString(PWINDOW->m_ruleApplicator->syncFullscreen());
+    else if (PROP == "immediate")
+        return windowPropToString(PWINDOW->m_ruleApplicator->tearing());
+    else if (PROP == "xray")
+        return windowPropToString(PWINDOW->m_ruleApplicator->xray());
+    else if (PROP == "render_unfocused")
+        return windowPropToString(PWINDOW->m_ruleApplicator->renderUnfocused());
+    else if (PROP == "no_follow_mouse")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noFollowMouse());
+    else if (PROP == "no_screen_share")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noScreenShare());
+    else if (PROP == "no_vrr")
+        return windowPropToString(PWINDOW->m_ruleApplicator->noVRR());
+    else if (PROP == "persistent_size")
+        return windowPropToString(PWINDOW->m_ruleApplicator->persistentSize());
+    else if (PROP == "stay_focused")
+        return windowPropToString(PWINDOW->m_ruleApplicator->stayFocused());
+    else if (PROP == "idle_inhibit")
+        return windowPropToString(PWINDOW->m_ruleApplicator->idleInhibitMode());
+    else if (PROP == "border_size")
+        return windowPropToString(PWINDOW->m_ruleApplicator->borderSize());
+    else if (PROP == "rounding")
+        return windowPropToString(PWINDOW->m_ruleApplicator->rounding());
+    else if (PROP == "rounding_power")
+        return windowPropToString(PWINDOW->m_ruleApplicator->roundingPower());
+    else if (PROP == "scroll_mouse")
+        return windowPropToString(PWINDOW->m_ruleApplicator->scrollMouse());
+    else if (PROP == "scroll_touchpad")
+        return windowPropToString(PWINDOW->m_ruleApplicator->scrollTouchpad());
 
     return "prop not found";
 }
@@ -1937,7 +2027,7 @@ static std::string getDescriptions(eHyprCtlOutputFormat format, std::string requ
 }
 
 static std::string submapRequest(eHyprCtlOutputFormat format, std::string request) {
-    std::string submap = g_pKeybindManager->getCurrentSubmap();
+    std::string submap = g_pKeybindManager->getCurrentSubmap().name;
     if (submap.empty())
         submap = "default";
 
@@ -1980,7 +2070,6 @@ CHyprCtl::CHyprCtl() {
     registerCommand(SHyprCtlCommand{"plugin", false, dispatchPlugin});
     registerCommand(SHyprCtlCommand{"notify", false, dispatchNotify});
     registerCommand(SHyprCtlCommand{"dismissnotify", false, dispatchDismissNotify});
-    registerCommand(SHyprCtlCommand{"setprop", false, dispatchSetProp});
     registerCommand(SHyprCtlCommand{"getprop", false, dispatchGetProp});
     registerCommand(SHyprCtlCommand{"seterror", false, dispatchSeterror});
     registerCommand(SHyprCtlCommand{"switchxkblayout", false, switchXKBLayoutRequest});
@@ -2096,8 +2185,7 @@ std::string CHyprCtl::getReply(std::string request) {
             if (!w->m_isMapped || !w->m_workspace || !w->m_workspace->isVisible())
                 continue;
 
-            w->updateDynamicRules();
-            g_pCompositor->updateWindowAnimatedDecorationValues(w);
+            Desktop::Rule::ruleEngine()->updateAllRules();
         }
 
         for (auto const& m : g_pCompositor->m_monitors) {

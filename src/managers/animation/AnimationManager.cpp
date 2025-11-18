@@ -98,7 +98,7 @@ static void handleUpdate(CAnimatedVariable<VarType>& av, bool warp) {
         if (!PMONITOR)
             return;
 
-        animationsDisabled = PWINDOW->m_windowData.noAnim.valueOr(animationsDisabled);
+        animationsDisabled = PWINDOW->m_ruleApplicator->noAnim().valueOr(animationsDisabled);
     } else if (PWORKSPACE) {
         PMONITOR = PWORKSPACE->m_monitor.lock();
         if (!PMONITOR)
@@ -142,7 +142,7 @@ static void handleUpdate(CAnimatedVariable<VarType>& av, bool warp) {
         PMONITOR = g_pCompositor->getMonitorFromVector(PLAYER->m_realPosition->goal() + PLAYER->m_realSize->goal() / 2.F);
         if (!PMONITOR)
             return;
-        animationsDisabled = animationsDisabled || PLAYER->m_noAnimations;
+        animationsDisabled = animationsDisabled || PLAYER->m_ruleApplicator->noanim().valueOrDefault();
     }
 
     const auto SPENT   = av.getPercent();
@@ -300,7 +300,7 @@ std::string CHyprAnimationManager::styleValidInConfigVar(const std::string& conf
     } else if (config.starts_with("workspaces") || config.starts_with("specialWorkspace")) {
         if (style == "slide" || style == "slidevert" || style == "fade")
             return "";
-        else if (style.starts_with("slidefade")) {
+        else if (style.starts_with("slide")) {
             // try parsing
             float movePerc = 0.f;
             if (style.find('%') != std::string::npos) {
