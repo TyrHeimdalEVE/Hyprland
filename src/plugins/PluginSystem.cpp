@@ -1,15 +1,17 @@
-#include "PluginResourceTracker.hpp" // Additional include for GPU resource tracking
+#include <other_includes>
+#include "PluginResourceTracker.hpp"
 
-void unloadPlugin() {
-    g_pConfigManager->removePluginConfig();
+void unloadPlugin(Plugin *plugin) {
+    // Existing unloadPlugin code...
+
     // === GPU Resource Cleanup ===
     if (g_pPluginResourceTracker) {
-        auto gpuResources = g_pPluginResourceTracker->getResourcesForPlugin(PLHANDLE);
+        auto gpuResources = g_pPluginResourceTracker->getResourcesForPlugin(plugin->m_handle);
         
         if (!gpuResources.empty()) {
             Log::logger->log(Log::INFO, 
                 " [PluginSystem] Plugin {} has {} GPU resources, forcing cleanup",
-                PLNAME, gpuResources.size());
+                plugin->m_name, gpuResources.size());
             
             // Ensure GPU is idle before cleanup
             glFinish();
@@ -39,7 +41,9 @@ void unloadPlugin() {
             glFinish();
             
             Log::logger->log(Log::DEBUG, 
-                " [PluginSystem] Plugin {} GPU cleanup complete", PLNAME);
+                " [PluginSystem] Plugin {} GPU cleanup complete", plugin->m_name);
         }
     }
+    
+    g_pConfigManager->removePluginConfig(plugin);
 }
