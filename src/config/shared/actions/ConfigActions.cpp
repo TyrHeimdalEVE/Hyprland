@@ -1513,6 +1513,17 @@ ActionResult Actions::denyWindowFromGroup(eTogglableAction action) {
     return {};
 }
 
+// the physical input held for the bind a pass comes from, if any, see CSeatManager::SPassTrigger
+static std::optional<CSeatManager::SPassTrigger> passTrigger() {
+    const auto& S = *Config::Actions::state();
+    if (S.m_heldCode != 0)
+        return CSeatManager::SPassTrigger{.code = S.m_heldCode - 8};
+    if (S.m_heldMouseCode != 0)
+        return CSeatManager::SPassTrigger{.code = S.m_heldMouseCode, .mouse = true};
+
+    return std::nullopt;
+}
+
 ActionResult Actions::pass(std::optional<PHLWINDOW> w) {
     auto window = xtract(w);
     if (!window)
@@ -1557,6 +1568,22 @@ ActionResult Actions::pass(std::optional<PHLWINDOW> w) {
         }
     }
 
+    // keep what's passed held while the bind's input is, see CSeatManager::SPassTrigger
+    const auto TRIGGER = passTrigger();
+    if (S.m_lastCode == 0) {
+        // kept pressed when the target loses pointer focus
+        if (S.m_passPressed == 1 && TRIGGER)
+            g_pSeatManager->holdPassedButton(S.m_lastMouseCode, window->wlSurface()->resource(), *TRIGGER);
+        else if (S.m_passPressed == 0)
+            g_pSeatManager->releasePassedButton(S.m_lastMouseCode, window->wlSurface()->resource());
+    } else {
+        // Xwayland releases held keys on leave, so it's kept entered
+        if (S.m_passPressed == 1 && TRIGGER && window->backend().isX11())
+            g_pSeatManager->holdPassedKey(S.m_lastCode - 8, *TRIGGER);
+        else if (S.m_passPressed == 0)
+            g_pSeatManager->releasePassedKey(S.m_lastCode - 8);
+    }
+
     if (XWTOXW)
         return {};
 
@@ -1575,7 +1602,7 @@ ActionResult Actions::pass(std::optional<PHLWINDOW> w) {
     if (S.m_lastCode != 0)
         g_pSeatManager->setKeyboardFocus(LASTKBSURF);
     else
-        g_pSeatManager->setPointerFocus(LASTMOUSESURF, SL);
+        g_pSeatManager->setPointerFocus(LASTMOUSESURF, SL, !g_pSeatManager->holdsPassedButtons());
 
     return {};
 }
@@ -1590,8 +1617,10 @@ ActionResult Actions::pass(Input::ModifierMask modMask, uint32_t key, std::optio
 
     auto        constraintGuard = g_pInputManager->pointerConstraints().suspend();
 
-    const auto& S           = *Config::Actions::state();
-    const auto  LASTSURFACE = Desktop::focusState()->surface();
+    const auto& S             = *Config::Actions::state();
+    const auto  LASTSURFACE   = Desktop::focusState()->surface();
+    const auto  TARGETSURFACE = window ? window->wlSurface()->resource() : nullptr;
+    const bool  XWLTARGET     = window && window->backend().isX11();
 
     if (window) {
         if (!isMouse)
@@ -1629,6 +1658,20 @@ ActionResult Actions::pass(Input::ModifierMask modMask, uint32_t key, std::optio
         }
     }
 
+    // see pass() above
+    const auto TRIGGER = passTrigger();
+    if (isMouse) {
+        if (S.m_passPressed == 1 && TRIGGER)
+            g_pSeatManager->holdPassedButton(key, TARGETSURFACE, *TRIGGER);
+        else if (S.m_passPressed == 0)
+            g_pSeatManager->releasePassedButton(key, TARGETSURFACE);
+    } else {
+        if (S.m_passPressed == 1 && TRIGGER && XWLTARGET)
+            g_pSeatManager->holdPassedKey(key - 8, *TRIGGER);
+        else if (S.m_passPressed == 0)
+            g_pSeatManager->releasePassedKey(key - 8);
+    }
+
     g_pSeatManager->sendKeyboardMods(0, 0, 0, 0);
 
     if (!window)
@@ -1649,7 +1692,7 @@ ActionResult Actions::pass(Input::ModifierMask modMask, uint32_t key, std::optio
     if (!isMouse)
         g_pSeatManager->setKeyboardFocus(LASTSURFACE);
     else
-        g_pSeatManager->setPointerFocus(LASTSURFACE, SL);
+        g_pSeatManager->setPointerFocus(LASTSURFACE, SL, !g_pSeatManager->holdsPassedButtons());
 
     return {};
 }

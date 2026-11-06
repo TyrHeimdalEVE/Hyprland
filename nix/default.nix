@@ -277,6 +277,8 @@ customStdenv.mkDerivation (finalAttrs: {
       install hyprtester/toplevel-capture -t $out/bin
       install hyprland_gtests -t $out/bin
       install hyprtester/child-window -t $out/bin
+      install hyprtester/pass-target -t $out/bin
+      install hyprtester/x11-keys -t $out/bin
     ''}
   '';
 

@@ -12,6 +12,9 @@
 #include "../devices/IKeyboard.hpp"
 #include "../desktop/view/LayerSurface.hpp"
 #include "../managers/input/InputManager.hpp"
+#include "../helpers/time/Time.hpp"
+#include "../xwayland/XWayland.hpp"
+#include "../xwayland/Server.hpp"
 #include "../state/MonitorState.hpp"
 #include "devices/IHID.hpp"
 #include "wlr-layer-shell-unstable-v1.hpp"
@@ -247,10 +250,18 @@ void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
 
     m_listeners.keyboardSurfaceDestroy.reset();
 
+    // Keep Xwayland entered while a key passed to it is held, unless focus moves to
+    // one of its own surfaces. The withheld leave is sent when the hold ends.
+    const auto PASSEDCLIENT = passedKeysClient();
+    const bool KEEPPASSED   = PASSEDCLIENT && (!surf || surf->client() != PASSEDCLIENT);
+
     // Don't gate leave on m_state.keyboardFocusResource — the WP can
     // be stale. sendLeave no-ops on keyboards without m_currentSurface.
     for (auto const& k : PROTO::seat->m_keyboards) {
         if (!k)
+            continue;
+
+        if (KEEPPASSED && k->m_owner && k->m_owner->client() == PASSEDCLIENT)
             continue;
 
         k->sendMods(0, m_keyboard->m_modifiersState.latched, m_keyboard->m_modifiersState.locked, m_keyboard->m_modifiersState.group);
@@ -277,6 +288,19 @@ void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
         const auto PKEYS = wl_array_add(&keys, PRESSEDARRSIZE);
         if (PKEYS)
             std::ranges::copy(PRESSED, sc<uint32_t*>(PKEYS));
+    }
+
+    // Xwayland released passed keys on the leave, report them as held again on enter
+    if (PASSEDCLIENT && surf->client() == PASSEDCLIENT) {
+        std::vector<uint32_t> added;
+        for (const auto& held : m_passedKeys) {
+            if (std::ranges::contains(PRESSED, held.key) || std::ranges::contains(added, held.key))
+                continue;
+
+            if (const auto PKEY = sc<uint32_t*>(wl_array_add(&keys, sizeof(uint32_t))))
+                *PKEY = held.key;
+            added.emplace_back(held.key);
+        }
     }
 
     auto client = surf->client();
@@ -343,7 +367,119 @@ void CSeatManager::sendKeyboardMods(uint32_t depressed, uint32_t latched, uint32
     }
 }
 
-void CSeatManager::setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& local) {
+wl_client* CSeatManager::passedKeysClient() {
+#ifndef NO_XWAYLAND
+    // tracked per client, not per surface: passing from one X11 window to another sends the key
+    // to the focused one, not the target
+    if (!m_passedKeys.empty() && g_pXWayland && g_pXWayland->m_server)
+        return g_pXWayland->m_server->m_xwaylandClient;
+#endif
+
+    return nullptr;
+}
+
+void CSeatManager::holdPassedKey(uint32_t key, const SPassTrigger& trigger) {
+    if (std::ranges::none_of(m_passedKeys, [&](const auto& held) { return held.key == key && held.trigger == trigger; }))
+        m_passedKeys.emplace_back(SPassedKey{.key = key, .trigger = trigger});
+}
+
+void CSeatManager::releasePassedKey(uint32_t key) {
+    const auto CLIENT = passedKeysClient();
+
+    if (std::erase_if(m_passedKeys, [key](const auto& held) { return held.key == key; }) > 0)
+        leavePassedKeysClient(CLIENT);
+}
+
+void CSeatManager::leavePassedKeysClient(wl_client* client) {
+    // send the leave setKeyboardFocus() withheld once nothing is held, unless the client has focus again
+    if (!client || !m_passedKeys.empty() || (m_state.keyboardFocus && m_state.keyboardFocus->client() == client))
+        return;
+
+    for (auto const& k : PROTO::seat->m_keyboards) {
+        if (!k || !k->m_owner || k->m_owner->client() != client)
+            continue;
+
+        if (m_keyboard)
+            k->sendMods(0, m_keyboard->m_modifiersState.latched, m_keyboard->m_modifiersState.locked, m_keyboard->m_modifiersState.group);
+        k->sendLeave();
+    }
+}
+
+void CSeatManager::holdPassedButton(uint32_t button, SP<CWLSurfaceResource> surface, const SPassTrigger& trigger) {
+    if (!surface || std::ranges::any_of(m_passedButtons, [&](const auto& held) { return held.button == button && held.surface == surface && held.trigger == trigger; }))
+        return;
+
+    SPassedButton held = {.button = button, .surface = surface, .trigger = trigger};
+    for (auto const& p : PROTO::seat->m_pointers) {
+        if (p && p->m_owner && p->m_owner->client() == surface->client())
+            held.pointers.emplace_back(p);
+    }
+
+    m_passedButtons.emplace_back(std::move(held));
+}
+
+void CSeatManager::releasePassedButton(uint32_t button, SP<CWLSurfaceResource> surface) {
+    std::erase_if(m_passedButtons, [&](const auto& held) { return held.button == button && held.surface == surface; });
+}
+
+bool CSeatManager::holdsPassedButtons() const {
+    return !m_passedButtons.empty();
+}
+
+void CSeatManager::releasePassHolds(const std::function<bool(const SPassTrigger&)>& released) {
+    // A hold normally ends with its release being passed. These are the ones whose release couldn't be,
+    // e.g. as the target stopped matching, so nothing stays held after what triggered it is released.
+    const auto                 TIMEMS = Time::millis(Time::steadyNow());
+
+    std::vector<SPassedButton> buttons;
+    std::erase_if(m_passedButtons, [&](const auto& held) {
+        if (!released(held.trigger))
+            return false;
+
+        buttons.emplace_back(held);
+        return true;
+    });
+
+    for (const auto& held : buttons) {
+        // still held for another trigger
+        if (std::ranges::any_of(m_passedButtons, [&](const auto& other) { return other.button == held.button && other.surface == held.surface; }))
+            continue;
+
+        for (auto const& p : held.pointers) {
+            if (p)
+                p->releaseButton(TIMEMS, held.button, held.surface.lock());
+        }
+    }
+
+    const auto            CLIENT = passedKeysClient();
+
+    std::vector<uint32_t> keys;
+    std::erase_if(m_passedKeys, [&](const auto& held) {
+        if (!released(held.trigger))
+            return false;
+
+        if (!std::ranges::contains(keys, held.key))
+            keys.emplace_back(held.key);
+        return true;
+    });
+
+    for (const auto key : keys) {
+        // still held for another trigger
+        if (!CLIENT || std::ranges::any_of(m_passedKeys, [key](const auto& held) { return held.key == key; }))
+            continue;
+
+        // sent even if Xwayland has focus, as no leave releases it then
+        for (auto const& k : PROTO::seat->m_keyboards) {
+            if (k && k->m_owner && k->m_owner->client() == CLIENT)
+                k->sendKey(TIMEMS, key, WL_KEYBOARD_KEY_STATE_RELEASED);
+        }
+    }
+
+    if (!keys.empty())
+        leavePassedKeysClient(CLIENT);
+}
+
+void CSeatManager::setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& local, bool releaseButtons) {
     const bool dndActive = PROTO::data && PROTO::data->dndActive();
 
     if (m_state.pointerFocus == surf)
@@ -374,7 +510,7 @@ void CSeatManager::setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& 
         if (!p)
             continue;
 
-        p->sendLeave();
+        p->sendLeave(releaseButtons);
     }
 
     auto lastPointerFocusResource = m_state.pointerFocusResource;
