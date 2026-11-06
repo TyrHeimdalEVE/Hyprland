@@ -101,7 +101,7 @@ std::string CPipeClient::readLine(int timeoutMs) {
             return "";
 
         std::array<char, 1024> buf = {};
-        const auto             LEN = read(m_readFd.get(), buf.data(), buf.size());
+        const auto             LEN = read(m_readFd.get(), buf.data(), buf.size()); // flawfinder: ignore
         if (LEN <= 0)
             return "";
 

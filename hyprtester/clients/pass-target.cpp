@@ -271,7 +271,7 @@ int main(int argc, char** argv) {
         }
 
         if (fds[1].revents & POLLIN) {
-            const ssize_t BYTESREAD = read(fds[1].fd, readBuf.data(), readBuf.size() - 1);
+            const ssize_t BYTESREAD = read(fds[1].fd, readBuf.data(), readBuf.size() - 1); // flawfinder: ignore
             if (BYTESREAD <= 0)
                 break;
             readBuf[BYTESREAD] = 0;
